@@ -311,20 +311,50 @@ export default function App() {
     }
 
 
+    // Magic bytes as nibbles: 0x41='A', 0x43='C', 0x53='S', 0x54='T'
+    const MAGIC_NIBS = [4, 1, 4, 3, 5, 3, 5, 4]
+
+    // Scan the raw nibble stream for the ACST magic at any offset (up to 32 nibbles)
+    // Returns the nibble index where magic starts, or -1 if not found.
+    function findSyncOffset(raw) {
+        const limit = Math.min(raw.length - MAGIC_NIBS.length, 32)
+        for (let off = 0; off <= limit; off++) {
+            let ok = true
+            for (let j = 0; j < MAGIC_NIBS.length; j++) {
+                if (raw[off + j] !== MAGIC_NIBS[j]) { ok = false; break }
+            }
+            if (ok) return off
+        }
+        return -1
+    }
+
     function finalizePacket() {
-        const trimNib = rxNibblesRef.current.slice(0, Math.floor(rxNibblesRef.current.length / 2) * 2)
-        if (trimNib.length < HEADER_LEN * 2) {
-            setRxStatus({ cls: 'warn', msg: `INCOMPLETE — got ${Math.floor(trimNib.length / 2)} bytes` })
+        const raw = rxNibblesRef.current
+
+        // ── Auto-sync: find where the ACST header actually starts ──
+        const syncOff = findSyncOffset(raw)
+        if (syncOff < 0) {
+            const got = Math.floor(raw.length / 2)
+            setRxStatus({ cls: 'warn', msg: `NO SYNC — received ${got} bytes, no magic found` })
             resetRxState()
             setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 3000)
             return
         }
+
+        // Re-align from the found sync point, ensure even nibble count
+        const aligned = raw.slice(syncOff)
+        const trimNib = aligned.slice(0, Math.floor(aligned.length / 2) * 2)
+        if (trimNib.length < HEADER_LEN * 2) {
+            setRxStatus({ cls: 'warn', msg: `INCOMPLETE — only ${Math.floor(trimNib.length / 2)} bytes after sync` })
+            resetRxState()
+            setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 3000)
+            return
+        }
+
         const allBytes = nibblesToBytes(trimNib)
         const hdr = parseHeader(allBytes)
-        if (!hdr) {
-            setRxStatus({ cls: 'warn', msg: 'BAD HEADER — check TX/RX settings match' })
-            resetRxState(); return
-        }
+        if (!hdr) { resetRxState(); return }  // shouldn't happen after sync
+
         const payload = allBytes.slice(HEADER_LEN, HEADER_LEN + hdr.payloadLen)
 
         if (hdr.type === TYPE_TEXT) {
@@ -353,13 +383,17 @@ export default function App() {
     useEffect(() => { finalizePacketRef.current = finalizePacket })
 
     function liveUpdateRxImage() {
-        if (rxNibblesRef.current.length < HEADER_LEN * 2) return
-        const hdr = parseHeader(nibblesToBytes(rxNibblesRef.current.slice(0, HEADER_LEN * 2)))
+        const raw = rxNibblesRef.current
+        if (raw.length < HEADER_LEN * 2) return
+        // Use auto-sync to find the header for image progress
+        const syncOff = findSyncOffset(raw)
+        if (syncOff < 0) return
+        const hdr = parseHeader(nibblesToBytes(raw.slice(syncOff, syncOff + HEADER_LEN * 2)))
         if (!hdr || hdr.type !== TYPE_IMAGE) return
-        const totalNib = (HEADER_LEN + hdr.payloadLen) * 2
-        const pct = Math.min(rxNibblesRef.current.length / totalNib * 100, 100)
-        setRxImgProg({ visible: true, pct, label: `RECEIVING IMAGE — ${rxNibblesRef.current.length}/${totalNib} (${pct.toFixed(0)}%)` })
-        if (rxNibblesRef.current.length >= totalNib) finalizePacketRef.current?.()
+        const totalNib = syncOff + (HEADER_LEN + hdr.payloadLen) * 2
+        const pct = Math.min(raw.length / totalNib * 100, 100)
+        setRxImgProg({ visible: true, pct, label: `RECEIVING IMAGE — ${raw.length}/${totalNib} (${pct.toFixed(0)}%)` })
+        if (raw.length >= totalNib) finalizePacketRef.current?.()
     }
 
     function startSampling() {
