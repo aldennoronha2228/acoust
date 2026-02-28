@@ -431,50 +431,37 @@ export default function App() {
                 hottest: i === det.symbol && m > THRESH
             })))
 
-            // ══ STATE MACHINE ══
 
             if (rxStateRef.current === RX_IDLE) {
                 const dominant = magA > magB ? 'A' : 'B'
                 if (Math.max(magA, magB) > THRESH) {
-                    // Record the FIRST moment we see preamble signal (before confirmation)
-                    if (!preambleFirstSeenRef.current) preambleFirstSeenRef.current = now
-
                     syncBufRef.current.push(dominant)
-                    if (syncBufRef.current.length > 20) syncBufRef.current.shift()
+                    if (syncBufRef.current.length > 24) syncBufRef.current.shift()
 
                     const buf = syncBufRef.current
                     let alternations = 0
                     for (let i = 1; i < buf.length; i++) if (buf[i] !== buf[i - 1]) alternations++
 
                     if (alternations >= 4 && buf.length >= 6) {
-                        rxStateRef.current = RX_SYNC
-                        // KEY FIX: compute data-start from FIRST-SEEN time, not detection time.
-                        // preamble = PREAMBLE_PAIRS*2 symbols, gap = 60ms
-                        // preambleFirstSeen ≈ when preamble actually started
-                        dataStartAtRef.current = preambleFirstSeenRef.current + (PREAMBLE_PAIRS * 2 * sd) + 60
-                        setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — SYNCING…' })
+                        // Chirp confirmed — go DIRECTLY to DATA mode.
+                        // No timing-based SYNC wait. Auto-sync in finalizePacket handles
+                        // any leading garbage nibbles collected before/during preamble end.
+                        rxStateRef.current = RX_DATA
+                        rxNibblesRef.current = []
+                        sampleBufRef.current = []
+                        lastSymTimeRef.current = now
+                        silenceCountRef.current = 0
+                        dataStartAtRef.current = now
+                        setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — COLLECTING…' })
                     }
                 } else {
                     if (syncBufRef.current.length > 0) syncBufRef.current.pop()
-                    // Reset first-seen if we lost signal entirely
-                    if (syncBufRef.current.length === 0) preambleFirstSeenRef.current = 0
-                }
-
-            } else if (rxStateRef.current === RX_SYNC) {
-                // Purely timing-based: wait until we calculate data starts
-                if (now >= dataStartAtRef.current) {
-                    rxStateRef.current = RX_DATA
-                    rxNibblesRef.current = []
-                    sampleBufRef.current = []
-                    lastSymTimeRef.current = now
-                    silenceCountRef.current = 0
-                    setRxStatus({ cls: 'info', msg: 'RECEIVING DATA…' })
                 }
 
             } else if (rxStateRef.current === RX_DATA) {
                 // Timeout: 45 seconds max
                 if (now - dataStartAtRef.current > 45000) {
-                    setRxStatus({ cls: 'warn', msg: 'TIMEOUT — no complete packet' })
+                    setRxStatus({ cls: 'warn', msg: 'TIMEOUT' })
                     resetRxState()
                     setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 2000)
                     return
@@ -494,13 +481,17 @@ export default function App() {
                         valid.forEach(s => counts[s]++)
                         rxNibblesRef.current.push(counts.indexOf(Math.max(...counts)))
                         silenceCountRef.current = 0
+                        // Update status to show receiving
+                        if (rxStateRef.current === RX_DATA && rxNibblesRef.current.length > 8) {
+                            setRxStatus({ cls: 'info', msg: 'RECEIVING DATA…' })
+                        }
                         liveUpdateRxImage()
                     } else {
                         silenceCountRef.current++
                         if (silenceCountRef.current >= 5 && rxNibblesRef.current.length >= HEADER_LEN * 2) {
                             finalizePacketRef.current?.(); return
                         }
-                        if (silenceCountRef.current >= 12 && rxNibblesRef.current.length === 0) {
+                        if (silenceCountRef.current >= 15 && rxNibblesRef.current.length < HEADER_LEN * 2) {
                             resetRxState()
                             setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }); return
                         }
@@ -579,13 +570,11 @@ export default function App() {
                 })
                 micStreamRef.current = stream
                 ctx = new (window.AudioContext || window.webkitAudioContext)()
-                tap = ctx.createGain(); tap.gain.value = 0  // tap not used in mic mode, just a dummy
-                ctx.createMediaStreamSource(stream).connect(ctx.createAnalyser()) // will be overridden below
             }
 
             const analyser = ctx.createAnalyser()
-            analyser.fftSize = 16384
-            analyser.smoothingTimeConstant = 0.1  // very fast response
+            analyser.fftSize = 4096          // 93ms window; good frequency resolution + fast response
+            analyser.smoothingTimeConstant = 0.05  // minimal smoothing for crisp transitions
 
             if (loopback) {
                 tap.connect(analyser)  // TX → tap → analyser
