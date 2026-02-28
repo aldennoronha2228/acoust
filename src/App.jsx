@@ -3,10 +3,11 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 // ══════════════════════════════════════════════════════════
 // CONSTANTS
 // ══════════════════════════════════════════════════════════
-// Preamble: alternating between two tones NOT in the MFSK data band
-// This creates a distinctive pattern impossible to confuse with ambient noise
-const PRE_TONE_A = 600   // Hz — below baseFreq
-const PRE_TONE_B = 800   // Hz — below baseFreq
+// Preamble: alternating between two tones ABOVE the MFSK data band.
+// Base freq 1000 + (15*200) = 4000Hz max. Preamble at 4400 & 4800 ensures no collision
+// and avoids the poor <1000Hz freq response of cheap cell phone speakers.
+const PRE_TONE_A = 4400  // Hz
+const PRE_TONE_B = 4800  // Hz
 const PREAMBLE_PAIRS = 3   // 3 A-B alternations = 6 symbol durations
 
 const MAGIC = [0x41, 0x43, 0x53, 0x54]
@@ -239,7 +240,8 @@ export default function App() {
             playTone(ctx, dest, PRE_TONE_A, t, symS * 0.9, 0.5); t += symS
             playTone(ctx, dest, PRE_TONE_B, t, symS * 0.9, 0.5); t += symS
         }
-        t += 0.06  // 60ms guard gap after preamble
+        // Guard gap: exactly 1 symbol duration to preserve phase locked grid
+        t += symS
 
         // ── Data symbols ──
         nibbles.forEach(nib => {
@@ -347,7 +349,7 @@ export default function App() {
             const got = Math.floor(raw.length / 2)
             const hexDump = nibsToHex(raw)
             // Show hex dump in output area so user and dev can see what arrived
-            setRxOutput(`NO SYNC (${got} bytes)\nRaw hex: ${hexDump}\n(expected magic: 41 43 53 54)`)
+            setRxOutput(`NO SYNC(${got} bytes) \nRaw hex: ${hexDump} \n(expected magic: 41 43 53 54)`)
             setRxOutputHas(true)
             setRxStatus({ cls: 'warn', msg: `NO SYNC — ${got} bytes received but magic not found` })
             resetRxState()
@@ -385,10 +387,10 @@ export default function App() {
             }
             img.src = url
             setRxImgProg(p => ({ ...p, visible: false }))
-            setRxOutput(`[IMAGE ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes]`); setRxOutputHas(true)
-            setRxStatus({ cls: 'ok', msg: `✓ IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH}px` })
+            setRxOutput(`[IMAGE ${hdr.imgW}×${hdr.imgH} px · ${payload.length} bytes]`); setRxOutputHas(true)
+            setRxStatus({ cls: 'ok', msg: `✓ IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH} px` })
         } else {
-            setRxStatus({ cls: 'warn', msg: `UNKNOWN TYPE 0x${hdr.type.toString(16)}` })
+            setRxStatus({ cls: 'warn', msg: `UNKNOWN TYPE 0x${hdr.type.toString(16)} ` })
         }
         resetRxState()
         setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 3000)
@@ -446,9 +448,9 @@ export default function App() {
                         rxStateRef.current = RX_SYNC
                         // Dead-reckoning from first signal edge:
                         // Preamble tones take: PREAMBLE_PAIRS * 2 * symDuration
-                        // Guard gap takes: 60ms
+                        // Guard gap takes: exactly 1 symDuration
                         // We subtract 40ms to compensate for the FFT window latency (it takes ~40ms of signal to breach threshold)
-                        dataStartAtRef.current = preambleFirstSeenRef.current - 40 + (PREAMBLE_PAIRS * 2 * sd) + 60
+                        dataStartAtRef.current = preambleFirstSeenRef.current - 40 + (PREAMBLE_PAIRS * 2 * sd) + sd
                         setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — SYNCING…' })
                     }
                 } else {
