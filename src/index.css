@@ -714,6 +714,43 @@ textarea:focus {
   transition: color 0.1s;
 }
 
+/* ── Loopback toggle ── */
+.loopback-row {
+  margin-top: 10px;
+  padding: 7px 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border);
+}
+
+.loopback-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+}
+
+.loopback-label input[type=checkbox] {
+  accent-color: var(--accent3);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.loopback-label input:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.loopback-hint {
+  color: var(--dim);
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+}
+
 /* ── Footer ── */
 .footer {
   text-align: center;

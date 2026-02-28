@@ -3,13 +3,17 @@ import { useRef, useState, useEffect, useCallback } from 'react'
 // ══════════════════════════════════════════════════════════
 // CONSTANTS
 // ══════════════════════════════════════════════════════════
-const PREAMBLE_FREQ = 500
-const PREAMBLE_SYMS = 4
+// Preamble: alternating between two tones NOT in the MFSK data band
+// This creates a distinctive pattern impossible to confuse with ambient noise
+const PRE_TONE_A = 600   // Hz — below baseFreq
+const PRE_TONE_B = 800   // Hz — below baseFreq
+const PREAMBLE_PAIRS = 3   // 3 A-B alternations = 6 symbol durations
+
 const MAGIC = [0x41, 0x43, 0x53, 0x54]
 const TYPE_TEXT = 0x54
 const TYPE_IMAGE = 0x49
 const HEADER_LEN = 16
-const RX_IDLE = 0, RX_PREAMBLE = 1, RX_DATA = 2
+const RX_IDLE = 0, RX_SYNC = 1, RX_DATA = 2
 
 // ── Packet helpers ──
 function buildHeader(type, payloadLen, imgW = 0, imgH = 0) {
@@ -46,10 +50,10 @@ function nibblesToBytes(nibbles) {
     return new Uint8Array(out)
 }
 
-function playTone(ctx, freq, startTime, duration, gain = 0.4) {
+function playTone(ctx, dest, freq, startTime, duration, gain = 0.4) {
     const osc = ctx.createOscillator()
     const gn = ctx.createGain()
-    osc.connect(gn); gn.connect(ctx.destination)
+    osc.connect(gn); gn.connect(dest)
     osc.type = 'sine'
     osc.frequency.setValueAtTime(freq, startTime)
     gn.gain.setValueAtTime(0, startTime)
@@ -66,13 +70,14 @@ function playTone(ctx, freq, startTime, duration, gain = 0.4) {
 export default function App() {
 
     // ── Config ──
-    const [symDuration, setSymDuration] = useState(120)   // 120ms default — more reliable
+    const [symDuration, setSymDuration] = useState(120)
     const [baseFreq, setBaseFreq] = useState(1000)
     const [freqSpacing, setFreqSpacing] = useState(200)
     const [imgSize, setImgSize] = useState(48)
-    const [threshold, setThreshold] = useState(0.03)  // lower default — more sensitive
+    const [threshold, setThreshold] = useState(0.08)
+    const [loopback, setLoopback] = useState(false) // route TX directly into RX analyser
 
-    // Keep ALL config in refs so setInterval always reads current values (stale-closure fix)
+    // Refs for stale-closure-safe access inside intervals
     const symDurRef = useRef(symDuration)
     const baseFreqRef = useRef(baseFreq)
     const spacingRef = useRef(freqSpacing)
@@ -85,11 +90,9 @@ export default function App() {
 
     const baudRate = Math.round((4 / symDuration) * 1000)
 
-    // Always read freqs from refs inside intervals
     const getFreqsLive = () =>
         Array.from({ length: 16 }, (_, i) => baseFreqRef.current + i * spacingRef.current)
 
-    // For render-scoped use (visualizer markers etc.)
     const getFreqs = useCallback(() =>
         Array.from({ length: 16 }, (_, i) => baseFreq + i * freqSpacing),
         [baseFreq, freqSpacing]
@@ -113,9 +116,8 @@ export default function App() {
     const pendingOrigCanvas = useRef(null)
     const pendingImgW = useRef(0)
     const pendingImgH = useRef(0)
-    const txCtxRef = useRef(null)
 
-    // ── RX UI state ──
+    // ── RX state ──
     const [isListening, setIsListening] = useState(false)
     const [rxStatus, setRxStatus] = useState({ cls: '', msg: 'MICROPHONE INACTIVE' })
     const [rxOutput, setRxOutput] = useState('—')
@@ -125,30 +127,31 @@ export default function App() {
     const [rxImgSrc, setRxImgSrc] = useState(null)
     const [rxImgStyle, setRxImgStyle] = useState({})
     const [symCells, setSymCells] = useState(Array(16).fill({ hot: false, hottest: false }))
-    const [debugMag, setDebugMag] = useState({ pre: '0.000', dom: '0.000', state: 'IDLE' })
+    const [debugInfo, setDebugInfo] = useState({ a: '0.000', b: '0.000', dom: '0.000', state: 'IDLE' })
 
-    // ── Audio refs ──
+    // Audio refs
     const rxCanvasRef = useRef(null)
-    const rxCtxRef = useRef(null)
+    const sharedCtxRef = useRef(null)   // single AudioContext for loopback; TX ctx otherwise
+    const loopTapRef = useRef(null)   // GainNode that TX signals connect to in loopback mode
     const analyserRef = useRef(null)
     const micStreamRef = useRef(null)
     const rxAnimIdRef = useRef(null)
     const sampleIntervalRef = useRef(null)
     const isListeningRef = useRef(false)
+    const loopbackRef = useRef(loopback)
+    useEffect(() => { loopbackRef.current = loopback }, [loopback])
 
-    // ── Decode state refs ──
+    // Decode state refs
     const rxStateRef = useRef(RX_IDLE)
     const rxNibblesRef = useRef([])
     const sampleBufRef = useRef([])
     const lastSymTimeRef = useRef(0)
-    const preambleAtRef = useRef(0)
-    const preambleEndsAtRef = useRef(0)   // timing-based data-start time
     const silenceCountRef = useRef(0)
-    const rxDataStartRef = useRef(0)   // when we entered DATA mode (for timeout)
+    const syncBufRef = useRef([])     // rolling window for chirp detection
+    const dataStartAtRef = useRef(0)
 
     useEffect(() => { isListeningRef.current = isListening }, [isListening])
 
-    // finalizePacket stored in ref so interval always calls latest version
     const finalizePacketRef = useRef(null)
 
     // ══════════════════════════════════════════════════════
@@ -158,23 +161,19 @@ export default function App() {
         if (!pendingOrigCanvas.current) return
         const q = jpegQuality / 100
         const dataURL = pendingOrigCanvas.current.toDataURL('image/jpeg', q)
-        const b64 = dataURL.split(',')[1]
-        const bin = atob(b64)
+        const b64 = dataURL.split(',')[1]; const bin = atob(b64)
         const bytes = new Uint8Array(bin.length)
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
         pendingJpegBytes.current = bytes
-
         const w = pendingImgW.current, h = pendingImgH.current
         const scale = Math.max(1, Math.floor(120 / Math.max(w, h)))
         setImgPreviewStyle({ width: w * scale, height: h * scale })
         setImgPreviewSrc(dataURL)
-
         const totalSymbols = Math.ceil((HEADER_LEN + bytes.length) * 2)
-        const estSec = ((totalSymbols + PREAMBLE_SYMS) * symDuration / 1000).toFixed(1)
+        const estSec = ((totalSymbols + PREAMBLE_PAIRS * 2) * symDuration / 1000).toFixed(1)
         setImgMeta({ w, h, bytes: bytes.length, totalSymbols, estSec })
         setDropLabel('IMAGE LOADED — DROP NEW TO REPLACE')
     }
-
     useEffect(() => { compressAndPreview() }, [jpegQuality]) // eslint-disable-line
 
     function handleImageFile(file) {
@@ -183,16 +182,12 @@ export default function App() {
         reader.onload = e => {
             const img = new Image()
             img.onload = () => {
-                const size = imgSize
-                const oc = document.createElement('canvas')
+                const size = imgSize; const oc = document.createElement('canvas')
                 oc.width = size; oc.height = size
                 const ctx = oc.getContext('2d')
-                ctx.imageSmoothingEnabled = true
-                ctx.imageSmoothingQuality = 'high'
+                ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'
                 ctx.drawImage(img, 0, 0, size, size)
-                pendingOrigCanvas.current = oc
-                pendingImgW.current = size
-                pendingImgH.current = size
+                pendingOrigCanvas.current = oc; pendingImgW.current = size; pendingImgH.current = size
                 compressAndPreview()
             }
             img.src = e.target.result
@@ -208,14 +203,11 @@ export default function App() {
         let payloadBytes, header
 
         if (txMode === 'text') {
-            const text = txInput
-            if (!text) return
+            const text = txInput; if (!text) return
             payloadBytes = new TextEncoder().encode(text)
             header = buildHeader(TYPE_TEXT, payloadBytes.length)
         } else {
-            if (!pendingJpegBytes.current) {
-                setTxStatus({ cls: 'warn', msg: 'NO IMAGE LOADED' }); return
-            }
+            if (!pendingJpegBytes.current) { setTxStatus({ cls: 'warn', msg: 'NO IMAGE LOADED' }); return }
             payloadBytes = pendingJpegBytes.current
             header = buildHeader(TYPE_IMAGE, payloadBytes.length, pendingImgW.current, pendingImgH.current)
         }
@@ -225,20 +217,37 @@ export default function App() {
         const nibbles = bytesToNibbles(fullPacket)
 
         setTxBusy(true); setTxAnimOn(true)
-        txCtxRef.current = new (window.AudioContext || window.webkitAudioContext)()
+
+        // In loopback mode, use the SHARED AudioContext so TX tones go directly to the analyser
+        // In normal mode, create a fresh TX AudioContext (tones go to speaker)
+        let ctx, dest
+        if (loopbackRef.current && sharedCtxRef.current) {
+            ctx = sharedCtxRef.current
+            dest = loopTapRef.current   // loopback tap → analyser
+        } else {
+            ctx = new (window.AudioContext || window.webkitAudioContext)()
+            dest = ctx.destination      // speaker
+        }
+
         const symS = symDuration / 1000
-        let t = txCtxRef.current.currentTime + 0.05
+        let t = ctx.currentTime + 0.05
 
-        playTone(txCtxRef.current, PREAMBLE_FREQ, t, symS * PREAMBLE_SYMS, 0.5)
-        t += symS * PREAMBLE_SYMS + 0.06  // 60ms gap after preamble
+        // ── Preamble: alternating A-B chirp ──
+        // Pattern: A B A B A B (PREAMBLE_PAIRS times)
+        for (let i = 0; i < PREAMBLE_PAIRS; i++) {
+            playTone(ctx, dest, PRE_TONE_A, t, symS * 0.9, 0.5); t += symS
+            playTone(ctx, dest, PRE_TONE_B, t, symS * 0.9, 0.5); t += symS
+        }
+        t += 0.06  // 60ms guard gap after preamble
 
+        // ── Data symbols ──
         nibbles.forEach(nib => {
-            playTone(txCtxRef.current, freqs[nib], t, symS * 0.9, 0.4)
+            playTone(ctx, dest, freqs[nib], t, symS * 0.88, 0.42)
             t += symS
         })
 
         const txStart = performance.now() + 50
-        const totalMs = (t - txCtxRef.current.currentTime) * 1000
+        const totalMs = (t - ctx.currentTime) * 1000
         setTxStatus({ cls: 'warn', msg: `TRANSMITTING ${nibbles.length} SYMBOLS…` })
 
         const anim = () => {
@@ -256,30 +265,31 @@ export default function App() {
     // ══════════════════════════════════════════════════════
     // RECEIVER
     // ══════════════════════════════════════════════════════
-    function resetRxState() {
-        rxStateRef.current = RX_IDLE
-        rxNibblesRef.current = []
-        sampleBufRef.current = []
-        preambleAtRef.current = 0
-        preambleEndsAtRef.current = 0
-        silenceCountRef.current = 0
-        rxDataStartRef.current = 0
-        setRxImgProg({ visible: false, pct: 0, label: 'RECEIVING…' })
+    function getFftMag(freq) {
+        const analyser = analyserRef.current
+        const rxCtx = sharedCtxRef.current
+        if (!analyser || !rxCtx) return 0
+        const buf = new Uint8Array(analyser.frequencyBinCount)
+        analyser.getByteFrequencyData(buf)
+        const bw = (rxCtx.sampleRate / 2) / analyser.frequencyBinCount
+        const bin = Math.round(freq / bw)
+        const w = 4; let s = 0
+        for (let j = Math.max(0, bin - w); j <= Math.min(buf.length - 1, bin + w); j++) s += buf[j]
+        return s / (2 * w + 1) / 255
     }
 
-    function detectSymbol() {
+    function detectDataSymbol() {
         const analyser = analyserRef.current
-        const rxCtx = rxCtxRef.current
+        const rxCtx = sharedCtxRef.current
         if (!analyser || !rxCtx) return null
         const buf = new Uint8Array(analyser.frequencyBinCount)
         analyser.getByteFrequencyData(buf)
         const nyq = rxCtx.sampleRate / 2
         const bw = nyq / analyser.frequencyBinCount
-        const freqs = getFreqsLive()  // ← always current via refs
+        const freqs = getFreqsLive()
 
         const mags = freqs.map(f => {
-            const bin = Math.round(f / bw)
-            const w = 5; let s = 0
+            const bin = Math.round(f / bw); const w = 5; let s = 0
             for (let j = Math.max(0, bin - w); j <= Math.min(buf.length - 1, bin + w); j++) s += buf[j]
             return s / (2 * w + 1) / 255
         })
@@ -288,137 +298,134 @@ export default function App() {
         return { symbol: bestSym, magnitude: bestMag, mags }
     }
 
-    function getPreambleMag() {
-        const analyser = analyserRef.current
-        const rxCtx = rxCtxRef.current
-        if (!analyser || !rxCtx) return 0
-        const buf = new Uint8Array(analyser.frequencyBinCount)
-        analyser.getByteFrequencyData(buf)
-        const bw = (rxCtx.sampleRate / 2) / analyser.frequencyBinCount
-        const bin = Math.round(PREAMBLE_FREQ / bw)
-        let s = 0; const w = 5
-        for (let j = Math.max(0, bin - w); j <= Math.min(buf.length - 1, bin + w); j++) s += buf[j]
-        return s / (2 * w + 1) / 255
+    function resetRxState() {
+        rxStateRef.current = RX_IDLE
+        rxNibblesRef.current = []
+        sampleBufRef.current = []
+        silenceCountRef.current = 0
+        syncBufRef.current = []
+        dataStartAtRef.current = 0
+        setRxImgProg({ visible: false, pct: 0, label: 'RECEIVING…' })
     }
 
     function finalizePacket() {
         const trimNib = rxNibblesRef.current.slice(0, Math.floor(rxNibblesRef.current.length / 2) * 2)
         if (trimNib.length < HEADER_LEN * 2) {
-            setRxStatus({ cls: 'warn', msg: `INCOMPLETE — got ${Math.floor(trimNib.length / 2)} bytes, need ${HEADER_LEN}+` })
+            setRxStatus({ cls: 'warn', msg: `INCOMPLETE — got ${Math.floor(trimNib.length / 2)} bytes` })
             resetRxState()
-            setTimeout(() => {
-                if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
-            }, 3000)
+            setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 3000)
             return
         }
         const allBytes = nibblesToBytes(trimNib)
         const hdr = parseHeader(allBytes)
         if (!hdr) {
-            setRxStatus({ cls: 'warn', msg: 'BAD HEADER — ensure TX/RX use same settings' })
+            setRxStatus({ cls: 'warn', msg: 'BAD HEADER — check TX/RX settings match' })
             resetRxState(); return
         }
-
         const payload = allBytes.slice(HEADER_LEN, HEADER_LEN + hdr.payloadLen)
 
         if (hdr.type === TYPE_TEXT) {
             const text = new TextDecoder().decode(payload)
-            setRxOutput(text); setRxOutputHas(true)
-            setRxImgSrc(null)
-            setRxStatus({ cls: 'ok', msg: `✓ TEXT RECEIVED — "${text.substring(0, 30)}${text.length > 30 ? '…' : ''}"` })
+            setRxOutput(text); setRxOutputHas(true); setRxImgSrc(null)
+            setRxStatus({ cls: 'ok', msg: `✓ RECEIVED: "${text.substring(0, 40)}${text.length > 40 ? '…' : ''}"` })
         } else if (hdr.type === TYPE_IMAGE) {
-            const blob = new Blob([payload], { type: 'image/jpeg' })
-            const url = URL.createObjectURL(blob)
+            const url = URL.createObjectURL(new Blob([payload], { type: 'image/jpeg' }))
             const img = new Image()
             img.onload = () => {
                 const scale = Math.max(1, Math.floor(220 / Math.max(img.width, img.height)))
-                setRxImgSrc(url)
-                setRxImgStyle({ width: img.width * scale, height: img.height * scale, display: 'block' })
+                setRxImgSrc(url); setRxImgStyle({ width: img.width * scale, height: img.height * scale, display: 'block' })
                 URL.revokeObjectURL(url)
             }
             img.src = url
             setRxImgProg(p => ({ ...p, visible: false }))
-            setRxOutput(`[IMAGE ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes]`)
-            setRxOutputHas(true)
-            setRxStatus({ cls: 'ok', msg: `✓ IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes` })
+            setRxOutput(`[IMAGE ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes]`); setRxOutputHas(true)
+            setRxStatus({ cls: 'ok', msg: `✓ IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH}px` })
         } else {
             setRxStatus({ cls: 'warn', msg: `UNKNOWN TYPE 0x${hdr.type.toString(16)}` })
         }
         resetRxState()
-        setTimeout(() => {
-            if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
-        }, 3000)
+        setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 3000)
     }
 
-    // Sync to ref every render so intervals always call latest
     useEffect(() => { finalizePacketRef.current = finalizePacket })
 
     function liveUpdateRxImage() {
         if (rxNibblesRef.current.length < HEADER_LEN * 2) return
         const hdr = parseHeader(nibblesToBytes(rxNibblesRef.current.slice(0, HEADER_LEN * 2)))
         if (!hdr || hdr.type !== TYPE_IMAGE) return
-        const totalNibbles = (HEADER_LEN + hdr.payloadLen) * 2
-        const pct = Math.min(rxNibblesRef.current.length / totalNibbles * 100, 100)
-        setRxImgProg({ visible: true, pct, label: `RECEIVING IMAGE — ${rxNibblesRef.current.length}/${totalNibbles} (${pct.toFixed(0)}%)` })
-        if (rxNibblesRef.current.length >= totalNibbles) finalizePacketRef.current?.()
+        const totalNib = (HEADER_LEN + hdr.payloadLen) * 2
+        const pct = Math.min(rxNibblesRef.current.length / totalNib * 100, 100)
+        setRxImgProg({ visible: true, pct, label: `RECEIVING IMAGE — ${rxNibblesRef.current.length}/${totalNib} (${pct.toFixed(0)}%)` })
+        if (rxNibblesRef.current.length >= totalNib) finalizePacketRef.current?.()
     }
 
     function startSampling() {
-        const sampleMs = Math.max(12, Math.floor(symDurRef.current / 5))
+        const sampleMs = Math.max(10, Math.floor(symDurRef.current / 6))
 
         sampleIntervalRef.current = setInterval(() => {
             const sd = symDurRef.current
             const THRESH = threshRef.current
             const now = performance.now()
-            const mp = getPreambleMag()
-            const det = detectSymbol()
+
+            // Read preamble tone magnitudes
+            const magA = getFftMag(PRE_TONE_A)
+            const magB = getFftMag(PRE_TONE_B)
+            const det = detectDataSymbol()
             if (!det) return
 
-            const stateNames = ['IDLE', 'PREAMBLE', 'DATA']
-            setDebugMag({ pre: mp.toFixed(3), dom: det.magnitude.toFixed(3), state: stateNames[rxStateRef.current] })
+            setDebugInfo({ a: magA.toFixed(3), b: magB.toFixed(3), dom: det.magnitude.toFixed(3), state: ['IDLE', 'SYNC', 'DATA'][rxStateRef.current] })
 
-            // Symbol grid
             setSymCells(det.mags.map((m, i) => ({
                 hot: m > THRESH * 0.4 && !(i === det.symbol && m > THRESH),
                 hottest: i === det.symbol && m > THRESH
             })))
 
-            // ── STATE MACHINE ──
+            // ══ STATE MACHINE ══
 
             if (rxStateRef.current === RX_IDLE) {
-                if (mp > THRESH) {
-                    if (!preambleAtRef.current) preambleAtRef.current = now
-                    if (now - preambleAtRef.current > sd * 1.0) {
-                        // FIX: timing-based data-start — don't rely on magnitude for the transition
-                        // Data starts exactly PREAMBLE_SYMS symbols + 60ms gap after preamble first detected
-                        preambleEndsAtRef.current = preambleAtRef.current + (PREAMBLE_SYMS * sd) + 60
-                        rxStateRef.current = RX_PREAMBLE
-                        setRxStatus({ cls: 'warn', msg: 'PREAMBLE DETECTED — INCOMING…' })
+                // Detect chirp preamble: both A and B must have been seen strongly
+                // We keep a rolling buffer of recent dominant tone detections
+                const dominant = magA > magB ? 'A' : 'B'
+                if (Math.max(magA, magB) > THRESH) {
+                    syncBufRef.current.push(dominant)
+                    if (syncBufRef.current.length > 20) syncBufRef.current.shift() // keep last 20
+
+                    // Count alternations in the buffer: ABABAB pattern
+                    const buf = syncBufRef.current
+                    let alternations = 0
+                    for (let i = 1; i < buf.length; i++) if (buf[i] !== buf[i - 1]) alternations++
+
+                    // Need at least 4 alternations (A→B, B→A, A→B, B→A) to confirm chirp
+                    if (alternations >= 4 && buf.length >= 6) {
+                        rxStateRef.current = RX_SYNC
+                        // Timing: preamble lasts PREAMBLE_PAIRS * 2 * symDur from first detection
+                        // We detected mid-preamble, so data starts roughly (PREAMBLE_PAIRS * 2 - buf.length/2) symbols from now
+                        // Simpler: wait one more full preamble length for safety
+                        dataStartAtRef.current = now + (PREAMBLE_PAIRS * 2 * sd) + 80
+                        setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — SYNCING…' })
                     }
                 } else {
-                    preambleAtRef.current = 0
+                    // No preamble signal: slowly drain the buffer
+                    if (syncBufRef.current.length > 0) syncBufRef.current.pop()
                 }
 
-            } else if (rxStateRef.current === RX_PREAMBLE) {
-                // FIX: purely TIMING-BASED transition — no longer depends on magnitude
-                // This eliminates the "stuck in PREAMBLE forever" bug caused by room echo
-                if (now >= preambleEndsAtRef.current) {
+            } else if (rxStateRef.current === RX_SYNC) {
+                // Purely timing-based: wait until we calculate data starts
+                if (now >= dataStartAtRef.current) {
                     rxStateRef.current = RX_DATA
                     rxNibblesRef.current = []
                     sampleBufRef.current = []
                     lastSymTimeRef.current = now
                     silenceCountRef.current = 0
-                    rxDataStartRef.current = now
                     setRxStatus({ cls: 'info', msg: 'RECEIVING DATA…' })
                 }
 
             } else if (rxStateRef.current === RX_DATA) {
-                // Timeout safety: if no valid packet after 45 seconds, reset
-                if (now - rxDataStartRef.current > 45000) {
-                    setRxStatus({ cls: 'warn', msg: 'RX TIMEOUT — reset and try again' })
+                // Timeout: 45 seconds max
+                if (now - dataStartAtRef.current > 45000) {
+                    setRxStatus({ cls: 'warn', msg: 'TIMEOUT — no complete packet' })
                     resetRxState()
-                    setTimeout(() => {
-                        if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
-                    }, 2000)
+                    setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 2000)
                     return
                 }
 
@@ -434,8 +441,7 @@ export default function App() {
                     if (valid.length > 0) {
                         const counts = new Array(16).fill(0)
                         valid.forEach(s => counts[s]++)
-                        const winner = counts.indexOf(Math.max(...counts))
-                        rxNibblesRef.current.push(winner)
+                        rxNibblesRef.current.push(counts.indexOf(Math.max(...counts)))
                         silenceCountRef.current = 0
                         liveUpdateRxImage()
                     } else {
@@ -443,15 +449,12 @@ export default function App() {
                         if (silenceCountRef.current >= 5 && rxNibblesRef.current.length >= HEADER_LEN * 2) {
                             finalizePacketRef.current?.(); return
                         }
-                        // FIX: if too many silent windows with NO data at all, reset and re-listen
-                        if (silenceCountRef.current >= 10 && rxNibblesRef.current.length === 0) {
+                        if (silenceCountRef.current >= 12 && rxNibblesRef.current.length === 0) {
                             resetRxState()
-                            setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
-                            return
+                            setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }); return
                         }
                     }
-                    sampleBufRef.current = []
-                    lastSymTimeRef.current = now
+                    sampleBufRef.current = []; lastSymTimeRef.current = now
                     const nb = rxNibblesRef.current.length
                     setDecodedBits(`SYM: ${nb}  BYTES: ${Math.floor(nb / 2)}  SILENCE: ${silenceCountRef.current}`)
                 }
@@ -459,120 +462,121 @@ export default function App() {
         }, sampleMs)
     }
 
-    // ── Visualizer ──
+    // ── Spectrum visualizer ──
     function drawVisualizer() {
         if (!isListeningRef.current) return
         rxAnimIdRef.current = requestAnimationFrame(drawVisualizer)
-        const canvas = rxCanvasRef.current
-        if (!canvas) return
+        const canvas = rxCanvasRef.current; if (!canvas) return
         const ctx = canvas.getContext('2d')
         const W = canvas.width = canvas.offsetWidth * devicePixelRatio
         const H = canvas.height = canvas.offsetHeight * devicePixelRatio
         ctx.clearRect(0, 0, W, H)
-        const analyser = analyserRef.current
-        const rxCtx = rxCtxRef.current
+        const analyser = analyserRef.current; const rxCtx = sharedCtxRef.current
         if (!analyser || !rxCtx) return
 
         const buf = new Uint8Array(analyser.frequencyBinCount)
         analyser.getByteFrequencyData(buf)
-        const nyq = rxCtx.sampleRate / 2
-        const bw = nyq / analyser.frequencyBinCount
+        const nyq = rxCtx.sampleRate / 2; const bw = nyq / analyser.frequencyBinCount
         const freqs = getFreqsLive()
-        const maxHz = freqs[freqs.length - 1] * 1.3
-        const binsShow = Math.floor(maxHz / bw)
+        const maxHz = freqs[freqs.length - 1] * 1.3; const binsShow = Math.floor(maxHz / bw)
 
         ctx.strokeStyle = 'rgba(13,61,90,0.5)'; ctx.lineWidth = 1
-        for (let i = 0; i <= 4; i++) {
-            const y = (i / 4) * H; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke()
-        }
+        for (let i = 0; i <= 4; i++) { const y = (i / 4) * H; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke() }
 
         const barW = W / binsShow
         for (let i = 0; i < binsShow; i++) {
             const v = buf[i] / 255, h = v * H, hz = i * bw
-            let minD = Infinity
-            freqs.forEach(f => { const d = Math.abs(hz - f); if (d < minD) minD = d })
-            const pDist = Math.abs(hz - PREAMBLE_FREQ)
+            let minD = Infinity; freqs.forEach(f => { const d = Math.abs(hz - f); if (d < minD) minD = d })
+            const pADist = Math.abs(hz - PRE_TONE_A); const pBDist = Math.abs(hz - PRE_TONE_B)
             let color
-            if (pDist < 80) color = `rgba(255,200,50,${0.5 + v * 0.5})`
+            if (pADist < 60 || pBDist < 60) color = `rgba(255,200,50,${0.5 + v * 0.5})`
             else if (minD < 80) color = `rgba(0,212,255,${0.4 + v * 0.6})`
             else color = `rgba(20,80,100,${0.25 + v * 0.4})`
             ctx.fillStyle = color
             ctx.fillRect(i * barW, H - h, Math.max(barW - 0.3, 1), h)
         }
-
         ctx.font = `${7 * devicePixelRatio}px Share Tech Mono`
         freqs.forEach((f, i) => {
             const x = (f / maxHz) * W
             ctx.strokeStyle = 'rgba(0,212,255,0.3)'; ctx.setLineDash([2, 3]); ctx.lineWidth = 1; ctx.globalAlpha = 0.5
             ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke()
-            ctx.setLineDash([]); ctx.globalAlpha = 1
-            ctx.fillStyle = 'rgba(0,212,255,0.6)'
+            ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.fillStyle = 'rgba(0,212,255,0.6)'
             ctx.fillText(i.toString(16).toUpperCase(), x + 1, H - 3)
         })
-
-        const px = (PREAMBLE_FREQ / maxHz) * W
-        ctx.strokeStyle = 'rgba(255,200,50,0.4)'; ctx.setLineDash([2, 3]); ctx.lineWidth = 1; ctx.globalAlpha = 0.5
-        ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke()
-        ctx.setLineDash([]); ctx.globalAlpha = 1
-        ctx.fillStyle = 'rgba(255,200,50,0.8)'
-        ctx.fillText('P', px + 1, H - 3)
+            ;[{ f: PRE_TONE_A, l: 'A' }, { f: PRE_TONE_B, l: 'B' }].forEach(({ f, l }) => {
+                const px = (f / maxHz) * W
+                ctx.strokeStyle = 'rgba(255,200,50,0.4)'; ctx.setLineDash([2, 3]); ctx.lineWidth = 1; ctx.globalAlpha = 0.5
+                ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke()
+                ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.fillStyle = 'rgba(255,200,50,0.8)'
+                ctx.fillText(l, px + 1, H - 3)
+            })
     }
 
     async function startListening() {
         try {
-            // ╔══════════════════════════════════════════════════════╗
-            // ║  FIX: Disable echo cancellation, noise suppression, ║
-            // ║  and auto gain — these are the #1 cause of data      ║
-            // ║  being filtered/distorted before it reaches decoder  ║
-            // ╚══════════════════════════════════════════════════════╝
-            const constraints = {
-                audio: {
-                    echoCancellation: false,
-                    noiseSuppression: false,
-                    autoGainControl: false,
-                    channelCount: 1,
-                },
-                video: false
+            let ctx, tap
+            if (loopback) {
+                // ── Loopback mode: single AudioContext, TX → tap → analyser (no mic!) ──
+                ctx = new (window.AudioContext || window.webkitAudioContext)()
+                tap = ctx.createGain(); tap.gain.value = 1
+                tap.connect(ctx.destination)   // also play through speaker
+            } else {
+                // ── Acoustic mode: mic → analyser ──
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+                    video: false
+                })
+                micStreamRef.current = stream
+                ctx = new (window.AudioContext || window.webkitAudioContext)()
+                tap = ctx.createGain(); tap.gain.value = 0  // tap not used in mic mode, just a dummy
+                ctx.createMediaStreamSource(stream).connect(ctx.createAnalyser()) // will be overridden below
             }
-            micStreamRef.current = await navigator.mediaDevices.getUserMedia(constraints)
-            rxCtxRef.current = new (window.AudioContext || window.webkitAudioContext)()
-            analyserRef.current = rxCtxRef.current.createAnalyser()
-            analyserRef.current.fftSize = 16384
-            analyserRef.current.smoothingTimeConstant = 0.15  // fast response
-            rxCtxRef.current.createMediaStreamSource(micStreamRef.current).connect(analyserRef.current)
 
-            setIsListening(true)
-            isListeningRef.current = true
-            setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
+            const analyser = ctx.createAnalyser()
+            analyser.fftSize = 16384
+            analyser.smoothingTimeConstant = 0.1  // very fast response
+
+            if (loopback) {
+                tap.connect(analyser)  // TX → tap → analyser
+            } else {
+                // Reconnect the mic to the analyser
+                const stream = micStreamRef.current
+                ctx.createMediaStreamSource(stream).connect(analyser)
+            }
+
+            sharedCtxRef.current = ctx
+            loopTapRef.current = loopback ? tap : null
+            analyserRef.current = analyser
+
+            setIsListening(true); isListeningRef.current = true
+            setRxStatus({ cls: 'info', msg: loopback ? 'LOOPBACK — READY TO RECEIVE' : 'LISTENING — WAITING FOR PREAMBLE…' })
             resetRxState()
             startSampling()
             requestAnimationFrame(drawVisualizer)
         } catch (e) {
-            setRxStatus({ cls: 'warn', msg: 'MIC ERROR: ' + e.message })
+            setRxStatus({ cls: 'warn', msg: 'ERROR: ' + e.message })
         }
     }
 
     function stopListening() {
-        isListeningRef.current = false
-        setIsListening(false)
+        isListeningRef.current = false; setIsListening(false)
         if (micStreamRef.current) micStreamRef.current.getTracks().forEach(t => t.stop())
-        if (rxCtxRef.current) rxCtxRef.current.close()
+        if (sharedCtxRef.current) sharedCtxRef.current.close()
         if (rxAnimIdRef.current) cancelAnimationFrame(rxAnimIdRef.current)
         if (sampleIntervalRef.current) clearInterval(sampleIntervalRef.current)
-        setRxStatus({ cls: '', msg: 'MICROPHONE INACTIVE' })
-        setDebugMag({ pre: '0.000', dom: '0.000', state: 'IDLE' })
+        micStreamRef.current = null; sharedCtxRef.current = null
+        loopTapRef.current = null; analyserRef.current = null
+        setRxStatus({ cls: '', msg: loopback ? 'LOOPBACK INACTIVE' : 'MICROPHONE INACTIVE' })
+        setDebugInfo({ a: '0.000', b: '0.000', dom: '0.000', state: 'IDLE' })
     }
 
     function toggleListen() { isListening ? stopListening() : startListening() }
 
     function clearOutput() {
-        setRxOutput('—'); setRxOutputHas(false)
-        setDecodedBits('')
-        setRxImgSrc(null)
-        setRxImgProg({ visible: false, pct: 0, label: 'RECEIVING…' })
+        setRxOutput('—'); setRxOutputHas(false); setDecodedBits('')
+        setRxImgSrc(null); setRxImgProg({ visible: false, pct: 0, label: 'RECEIVING…' })
         resetRxState()
     }
-
     useEffect(() => () => { stopListening() }, []) // eslint-disable-line
 
     // ══════════════════════════════════════════════════════
@@ -590,17 +594,17 @@ export default function App() {
                 <div className="config-item">
                     <label htmlFor="symDuration">SYMBOL DURATION (ms)</label>
                     <input id="symDuration" type="number" value={symDuration} min="30" max="400" step="10"
-                        onChange={e => setSymDuration(+e.target.value)} />
+                        onChange={e => setSymDuration(+e.target.value)} disabled={isListening} />
                 </div>
                 <div className="config-item">
                     <label htmlFor="baseFreq">BASE FREQ (Hz)</label>
                     <input id="baseFreq" type="number" value={baseFreq} min="400" max="3000" step="100"
-                        onChange={e => setBaseFreq(+e.target.value)} />
+                        onChange={e => setBaseFreq(+e.target.value)} disabled={isListening} />
                 </div>
                 <div className="config-item">
                     <label htmlFor="freqSpacing">FREQ SPACING (Hz)</label>
                     <input id="freqSpacing" type="number" value={freqSpacing} min="50" max="500" step="50"
-                        onChange={e => setFreqSpacing(+e.target.value)} />
+                        onChange={e => setFreqSpacing(+e.target.value)} disabled={isListening} />
                 </div>
                 <div className="config-item">
                     <label htmlFor="imgSize">IMG SIZE (px)</label>
@@ -609,7 +613,7 @@ export default function App() {
                 </div>
                 <div className="config-item">
                     <label htmlFor="threshold">SENSITIVITY</label>
-                    <input id="threshold" type="number" value={threshold} min="0.01" max="0.2" step="0.01"
+                    <input id="threshold" type="number" value={threshold} min="0.01" max="0.5" step="0.01"
                         onChange={e => setThreshold(+e.target.value)} />
                 </div>
                 <div className="baud-display">{baudRate} bps</div>
@@ -639,21 +643,17 @@ export default function App() {
                     {txMode === 'image' && (
                         <div id="imageMode">
                             <div className="section-label">Image Upload (JPEG compressed before TX)</div>
-                            <div
-                                className={`img-drop${dragOver ? ' drag-over' : ''}`}
-                                id="imgDrop"
+                            <div className={`img-drop${dragOver ? ' drag-over' : ''}`} id="imgDrop"
                                 onDragOver={e => { e.preventDefault(); setDragOver(true) }}
                                 onDragLeave={() => setDragOver(false)}
-                                onDrop={e => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files[0]) handleImageFile(e.dataTransfer.files[0]) }}
-                            >
+                                onDrop={e => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files[0]) handleImageFile(e.dataTransfer.files[0]) }}>
                                 <input type="file" id="imgFileInput" accept="image/*" onChange={e => handleImageFile(e.target.files[0])} />
                                 <div className="drop-icon">⬆</div>
                                 <div className="drop-label">{dropLabel}</div>
                             </div>
                             <div className="quality-row">
                                 <label htmlFor="jpegQuality">JPEG QUALITY</label>
-                                <input id="jpegQuality" type="range" min="5" max="95" value={jpegQuality}
-                                    onChange={e => setJpegQuality(+e.target.value)} />
+                                <input id="jpegQuality" type="range" min="5" max="95" value={jpegQuality} onChange={e => setJpegQuality(+e.target.value)} />
                                 <span className="qval">{jpegQuality}%</span>
                             </div>
                             {imgPreviewSrc && (
@@ -689,9 +689,10 @@ export default function App() {
 
                     {isListening && (
                         <div className="debug-bar">
-                            <span>STATE: <em style={{ color: debugMag.state === 'DATA' ? 'var(--accent3)' : debugMag.state === 'PREAMBLE' ? 'var(--accent2)' : 'var(--dim)' }}>{debugMag.state}</em></span>
-                            <span>PREAMBLE: <em style={{ color: +debugMag.pre > threshold ? 'var(--accent3)' : 'var(--dim)' }}>{debugMag.pre}</em></span>
-                            <span>DOMINANT: <em style={{ color: +debugMag.dom > threshold ? 'var(--accent)' : 'var(--dim)' }}>{debugMag.dom}</em></span>
+                            <span>STATE: <em style={{ color: debugInfo.state === 'DATA' ? 'var(--accent3)' : debugInfo.state === 'SYNC' ? 'var(--accent2)' : 'var(--dim)' }}>{debugInfo.state}</em></span>
+                            <span>PRE-A: <em style={{ color: +debugInfo.a > threshold ? 'var(--accent3)' : 'var(--dim)' }}>{debugInfo.a}</em></span>
+                            <span>PRE-B: <em style={{ color: +debugInfo.b > threshold ? 'var(--accent3)' : 'var(--dim)' }}>{debugInfo.b}</em></span>
+                            <span>DATA: <em style={{ color: +debugInfo.dom > threshold ? 'var(--accent)' : 'var(--dim)' }}>{debugInfo.dom}</em></span>
                             <span style={{ color: 'var(--dim)' }}>THRESH: {threshold}</span>
                         </div>
                     )}
@@ -704,8 +705,18 @@ export default function App() {
                         ))}
                     </div>
 
+                    {/* Loopback toggle */}
+                    <div className="loopback-row">
+                        <label className="loopback-label" htmlFor="loopbackToggle">
+                            <input id="loopbackToggle" type="checkbox" checked={loopback} disabled={isListening}
+                                onChange={e => setLoopback(e.target.checked)} />
+                            <span>LOOPBACK MODE</span>
+                            <span className="loopback-hint">{loopback ? '— TX routes directly to RX (same device, no mic)' : '— uses microphone (separate devices)'}</span>
+                        </label>
+                    </div>
+
                     <button id="listenBtn" className={`btn btn-listen${isListening ? ' active' : ''}`} onClick={toggleListen}>
-                        {isListening ? '■ STOP LISTENING' : '⬤ START LISTENING'}
+                        {isListening ? '■ STOP' : loopback ? '⬤ START LOOPBACK' : '⬤ START LISTENING'}
                     </button>
                     <div className={`status${rxStatus.cls ? ' ' + rxStatus.cls : ''}`}>{rxStatus.msg}</div>
 
