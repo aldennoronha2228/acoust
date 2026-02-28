@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ACOUST — Fast Acoustic Modem</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #050a0e;
+    --panel: #0a1520;
+    --border: #0d3d5a;
+    --accent: #00d4ff;
+    --accent2: #ff6b35;
+    --accent3: #39ff14;
+    --text: #c8e8f0;
+    --dim: #3a6070;
+    --glow: 0 0 20px rgba(0,212,255,0.3);
+    --glow2: 0 0 20px rgba(255,107,53,0.3);
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{
+    background:var(--bg);color:var(--text);
+    font-family:'Share Tech Mono',monospace;
+    min-height:100vh;overflow-x:hidden;
+    background-image:
+      radial-gradient(ellipse at 20% 50%,rgba(0,50,80,0.4) 0%,transparent 60%),
+      radial-gradient(ellipse at 80% 20%,rgba(0,30,60,0.3) 0%,transparent 50%);
+  }
+  body::before{
+    content:'';position:fixed;inset:0;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.07) 2px,rgba(0,0,0,0.07) 4px);
+    pointer-events:none;z-index:999;
+  }
+  .header{text-align:center;padding:32px 20px 16px;border-bottom:1px solid var(--border);position:relative;}
+  .header::after{content:'';position:absolute;bottom:-1px;left:50%;transform:translateX(-50%);width:200px;height:1px;background:var(--accent);box-shadow:var(--glow);}
+  .logo{font-family:'Orbitron',monospace;font-size:2.8rem;font-weight:900;letter-spacing:0.3em;color:var(--accent);text-shadow:0 0 30px rgba(0,212,255,0.6),0 0 60px rgba(0,212,255,0.2);animation:flicker 8s infinite;}
+  @keyframes flicker{0%,95%,97%,100%{opacity:1;}96%{opacity:0.7;}}
+  .tagline{color:var(--dim);font-size:0.68rem;letter-spacing:0.35em;margin-top:6px;text-transform:uppercase;}
+  .speed-badge{display:inline-block;background:rgba(57,255,20,0.12);border:1px solid var(--accent3);color:var(--accent3);font-size:0.6rem;letter-spacing:0.2em;padding:3px 10px;margin-top:8px;}
+
+  .config-bar{display:flex;justify-content:center;gap:24px;padding:12px 20px;border-bottom:1px solid var(--border);flex-wrap:wrap;align-items:center;}
+  .config-item{display:flex;align-items:center;gap:8px;font-size:0.7rem;color:var(--dim);letter-spacing:0.08em;}
+  .config-item label{color:var(--accent);}
+  .config-item input[type=number],.config-item select{
+    background:var(--panel);border:1px solid var(--border);color:var(--accent);
+    font-family:'Share Tech Mono',monospace;font-size:0.7rem;padding:4px 8px;
+    width:72px;text-align:center;outline:none;transition:border-color .2s,box-shadow .2s;
+  }
+  .config-item select{width:auto;cursor:pointer;}
+  .config-item input:focus,.config-item select:focus{border-color:var(--accent);box-shadow:var(--glow);}
+  .baud-display{font-family:'Orbitron',monospace;font-size:0.8rem;color:var(--accent3);letter-spacing:0.1em;padding:4px 12px;border:1px solid rgba(57,255,20,0.3);background:rgba(57,255,20,0.05);}
+
+  .main{display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:1300px;margin:0 auto;padding:24px 20px;}
+  @media(max-width:800px){.main{grid-template-columns:1fr;}.logo{font-size:2rem;}}
+
+  .panel{background:var(--panel);border:1px solid var(--border);position:relative;padding:22px;overflow:hidden;}
+  .panel::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;}
+  .panel-sender::before{background:var(--accent2);box-shadow:var(--glow2);}
+  .panel-receiver::before{background:var(--accent);box-shadow:var(--glow);}
+  .panel-title{font-family:'Orbitron',monospace;font-size:0.72rem;letter-spacing:0.3em;text-transform:uppercase;margin-bottom:18px;display:flex;align-items:center;gap:10px;}
+  .panel-sender .panel-title{color:var(--accent2);}
+  .panel-receiver .panel-title{color:var(--accent);}
+  .dot{width:8px;height:8px;border-radius:50%;animation:pulse 2s infinite;}
+  .panel-sender .dot{background:var(--accent2);}
+  .panel-receiver .dot{background:var(--accent);}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.5;transform:scale(0.8);}}
+
+  .mode-tabs{display:flex;margin-bottom:14px;border:1px solid var(--border);}
+  .tab-btn{flex:1;background:transparent;border:none;color:var(--dim);font-family:'Orbitron',monospace;font-size:0.62rem;letter-spacing:0.2em;padding:8px 4px;cursor:pointer;transition:all .2s;text-transform:uppercase;}
+  .tab-btn:not(:last-child){border-right:1px solid var(--border);}
+  .tab-btn.active{background:rgba(255,107,53,0.15);color:var(--accent2);}
+  .tab-btn:hover:not(.active){color:var(--text);background:rgba(255,255,255,0.03);}
+
+  textarea,.output-area{width:100%;background:rgba(0,0,0,0.4);border:1px solid var(--border);color:var(--text);font-family:'Share Tech Mono',monospace;font-size:0.82rem;padding:12px;resize:vertical;outline:none;line-height:1.6;transition:border-color .2s,box-shadow .2s;min-height:90px;}
+  textarea:focus{border-color:var(--accent2);box-shadow:0 0 12px rgba(255,107,53,0.2);}
+  .output-area{min-height:60px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;}
+  .output-area.has-content{border-color:var(--accent3);box-shadow:0 0 12px rgba(57,255,20,0.15);}
+
+  .img-drop{width:100%;min-height:100px;border:1px dashed var(--border);background:rgba(0,0,0,0.3);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;cursor:pointer;transition:border-color .2s,background .2s;position:relative;overflow:hidden;}
+  .img-drop:hover,.img-drop.drag-over{border-color:var(--accent2);background:rgba(255,107,53,0.05);}
+  .img-drop input{position:absolute;inset:0;opacity:0;cursor:pointer;}
+  .img-drop .drop-label{font-size:0.65rem;color:var(--dim);letter-spacing:0.12em;text-align:center;pointer-events:none;}
+  .img-drop .drop-icon{font-size:1.6rem;opacity:0.4;pointer-events:none;}
+
+  .img-preview-wrap{display:none;gap:12px;margin-top:12px;align-items:flex-start;}
+  .img-preview-wrap.visible{display:flex;}
+  .img-preview-wrap canvas{border:1px solid var(--accent2);box-shadow:0 0 8px rgba(255,107,53,0.2);image-rendering:pixelated;flex-shrink:0;}
+  .img-meta{font-size:0.62rem;color:var(--dim);line-height:2;}
+  .img-meta span{color:var(--accent);}
+  .img-meta .fast{color:var(--accent3);}
+
+  .quality-row{display:flex;align-items:center;gap:10px;margin-top:10px;}
+  .quality-row label{font-size:0.65rem;color:var(--dim);letter-spacing:0.1em;flex-shrink:0;}
+  .quality-row input[type=range]{flex:1;accent-color:var(--accent2);height:3px;}
+  .quality-row .qval{font-size:0.65rem;color:var(--accent);width:30px;text-align:right;}
+
+  .btn{font-family:'Orbitron',monospace;font-size:0.68rem;letter-spacing:0.18em;text-transform:uppercase;border:none;cursor:pointer;padding:11px 20px;position:relative;overflow:hidden;transition:all .2s;clip-path:polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%);}
+  .btn-transmit{background:var(--accent2);color:#0a0500;width:100%;margin-top:12px;font-size:0.78rem;}
+  .btn-transmit:hover:not(:disabled){background:#ff8c5a;box-shadow:var(--glow2);transform:translateY(-1px);}
+  .btn-transmit:disabled{opacity:0.4;cursor:not-allowed;}
+  .btn-listen{background:transparent;color:var(--accent);border:1px solid var(--accent);width:100%;margin-top:12px;}
+  .btn-listen:hover{background:rgba(0,212,255,0.1);box-shadow:var(--glow);}
+  .btn-listen.active{background:var(--accent);color:var(--bg);box-shadow:var(--glow);}
+
+  .progress-wrap{margin-top:10px;height:4px;background:rgba(255,107,53,0.15);overflow:hidden;}
+  .progress-bar{height:100%;background:var(--accent2);width:0%;transition:width .08s linear;box-shadow:0 0 6px var(--accent2);}
+  .status{font-size:0.66rem;letter-spacing:0.08em;margin-top:8px;min-height:16px;color:var(--dim);}
+  .status.ok{color:var(--accent3);} .status.warn{color:var(--accent2);} .status.info{color:var(--accent);}
+
+  #rxCanvas{width:100%;height:90px;background:rgba(0,0,0,0.4);border:1px solid var(--border);margin-top:12px;display:block;}
+
+  .freq-indicators{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;}
+  .freq-bar{flex:1;min-width:60px;background:rgba(0,0,0,0.4);border:1px solid var(--border);padding:7px;text-align:center;}
+  .freq-bar .label{font-size:0.55rem;color:var(--dim);letter-spacing:0.08em;}
+  .freq-bar .val{font-family:'Orbitron',monospace;font-size:0.8rem;margin-top:3px;transition:color .1s,transform .1s;}
+  .freq-bar .val.active{transform:scale(1.1);}
+  .meter{height:2px;background:var(--border);margin-top:4px;overflow:hidden;}
+  .meter-fill{height:100%;width:0%;transition:width .05s;}
+
+  #rxImageCanvas{display:none;border:1px solid var(--accent3);box-shadow:0 0 12px rgba(57,255,20,0.2);image-rendering:pixelated;margin-top:12px;max-width:100%;}
+  #rxImageCanvas.visible{display:block;}
+
+  .section-label{font-size:0.6rem;letter-spacing:0.18em;color:var(--dim);text-transform:uppercase;margin-top:14px;margin-bottom:5px;}
+  .clear-btn{font-family:'Share Tech Mono',monospace;font-size:0.62rem;color:var(--dim);background:none;border:none;cursor:pointer;float:right;letter-spacing:0.1em;transition:color .2s;}
+  .clear-btn:hover{color:var(--accent2);}
+
+  .tx-anim{display:none;height:2px;background:linear-gradient(90deg,transparent,var(--accent2),transparent);background-size:200%;animation:sweep .4s linear infinite;margin-top:5px;}
+  .tx-anim.on{display:block;}
+  @keyframes sweep{0%{background-position:-100% 0;}100%{background-position:200% 0;}}
+
+  .rx-img-progress{display:none;margin-top:12px;background:rgba(0,0,0,0.5);border:1px solid var(--border);padding:9px 12px;}
+  .rx-img-progress.visible{display:block;}
+  .rx-img-bar-wrap{height:4px;background:var(--border);margin-top:5px;}
+  .rx-img-bar{height:100%;background:var(--accent3);width:0%;transition:width .08s;box-shadow:0 0 6px var(--accent3);}
+  .rx-img-label{font-size:0.63rem;color:var(--accent3);letter-spacing:0.08em;}
+
+  .corner-deco{position:absolute;width:14px;height:14px;border-color:var(--dim);border-style:solid;opacity:0.35;}
+  .tl{top:5px;left:5px;border-width:1px 0 0 1px;} .tr{top:5px;right:5px;border-width:1px 1px 0 0;}
+  .bl{bottom:5px;left:5px;border-width:0 0 1px 1px;} .br{bottom:5px;right:5px;border-width:0 1px 1px 0;}
+
+  /* MFSK symbol indicator */
+  .symbol-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;margin-top:10px;}
+  .sym-cell{height:18px;background:rgba(0,0,0,0.4);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:0.55rem;color:var(--dim);transition:all .1s;}
+  .sym-cell.hot{background:rgba(0,212,255,0.2);border-color:var(--accent);color:var(--accent);}
+  .sym-cell.hottest{background:rgba(0,212,255,0.5);border-color:var(--accent);color:#fff;box-shadow:0 0 6px var(--accent);}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">ACOUST</div>
+  <div class="tagline">MFSK-16 · 4 bits per symbol · Acoustic Data Modem</div>
+  <div class="speed-badge">⚡ 4× FASTER THAN BFSK</div>
+</div>
+
+<div class="config-bar">
+  <div class="config-item">
+    <label>SYMBOL DURATION (ms)</label>
+    <input type="number" id="symDuration" value="80" min="30" max="400" step="10" oninput="updateBaudDisplay()">
+  </div>
+  <div class="config-item">
+    <label>BASE FREQ (Hz)</label>
+    <input type="number" id="baseFreq" value="1000" min="400" max="3000" step="100" oninput="updateBaudDisplay()">
+  </div>
+  <div class="config-item">
+    <label>FREQ SPACING (Hz)</label>
+    <input type="number" id="freqSpacing" value="200" min="50" max="500" step="50" oninput="updateBaudDisplay()">
+  </div>
+  <div class="config-item">
+    <label>IMG SIZE (px)</label>
+    <input type="number" id="imgSize" value="48" min="8" max="128" step="8">
+  </div>
+  <div class="baud-display" id="baudDisplay">-- bps</div>
+</div>
+
+<div class="main">
+
+<!-- ══ SENDER ══ -->
+<div class="panel panel-sender">
+  <div class="corner-deco tl"></div><div class="corner-deco tr"></div>
+  <div class="corner-deco bl"></div><div class="corner-deco br"></div>
+  <div class="panel-title"><span class="dot"></span>TX — TRANSMITTER</div>
+
+  <div class="mode-tabs">
+    <button class="tab-btn active" id="tabText"  onclick="setMode('text')">◈ TEXT</button>
+    <button class="tab-btn"        id="tabImage" onclick="setMode('image')">◧ IMAGE</button>
+  </div>
+
+  <div id="textMode">
+    <div class="section-label">Message Input</div>
+    <textarea id="txInput" rows="4" placeholder="Enter message to transmit...">Hello World!</textarea>
+  </div>
+
+  <div id="imageMode" style="display:none;">
+    <div class="section-label">Image Upload (JPEG compressed before TX)</div>
+    <div class="img-drop" id="imgDrop">
+      <input type="file" id="imgFileInput" accept="image/*" onchange="handleImageFile(this.files[0])">
+      <div class="drop-icon">⬆</div>
+      <div class="drop-label">DROP IMAGE · CLICK TO BROWSE<br>Auto-compressed to JPEG before transmit</div>
+    </div>
+    <div class="quality-row">
+      <label>JPEG QUALITY</label>
+      <input type="range" id="jpegQuality" min="5" max="95" value="40" oninput="onQualityChange()">
+      <span class="qval" id="qvalDisplay">40%</span>
+    </div>
+    <div class="img-preview-wrap" id="imgPreviewWrap">
+      <canvas id="imgPreviewCanvas"></canvas>
+      <div class="img-meta" id="imgMeta"></div>
+    </div>
+  </div>
+
+  <button class="btn btn-transmit" id="txBtn" onclick="transmit()">▶ TRANSMIT</button>
+  <div class="tx-anim" id="txAnim"></div>
+  <div class="progress-wrap"><div class="progress-bar" id="txProgress"></div></div>
+  <div class="status" id="txStatus">READY — MFSK-16 MODE</div>
+</div>
+
+<!-- ══ RECEIVER ══ -->
+<div class="panel panel-receiver">
+  <div class="corner-deco tl"></div><div class="corner-deco tr"></div>
+  <div class="corner-deco bl"></div><div class="corner-deco br"></div>
+  <div class="panel-title"><span class="dot"></span>RX — RECEIVER</div>
+
+  <canvas id="rxCanvas"></canvas>
+
+  <!-- 16-symbol indicator grid -->
+  <div class="symbol-grid" id="symbolGrid"></div>
+
+  <button class="btn btn-listen" id="listenBtn" onclick="toggleListen()">⬤ START LISTENING</button>
+  <div class="status" id="rxStatus">MICROPHONE INACTIVE</div>
+
+  <div class="rx-img-progress" id="rxImgProgress">
+    <div class="rx-img-label" id="rxImgLabel">RECEIVING…</div>
+    <div class="rx-img-bar-wrap"><div class="rx-img-bar" id="rxImgBar"></div></div>
+  </div>
+
+  <canvas id="rxImageCanvas"></canvas>
+
+  <div class="section-label">Decoded Output <button class="clear-btn" onclick="clearOutput()">[ CLEAR ]</button></div>
+  <div class="output-area" id="rxOutput">—</div>
+  <div class="status" id="decodedBits" style="margin-top:6px;"></div>
+</div>
+
+</div><!-- .main -->
+
+<script>
+// ══════════════════════════════════════════════════════════
+// MFSK-16: 16 frequencies, each symbol carries 4 bits
+// Frequencies: baseFreq + n * freqSpacing  (n = 0..15)
+// ══════════════════════════════════════════════════════════
+
+const PREAMBLE_FREQ = 500; // dedicated preamble tone (below base)
+const PREAMBLE_SYMS = 4;   // number of preamble symbol-durations
+
+function getFreqs() {
+  const base    = +document.getElementById('baseFreq').value;
+  const spacing = +document.getElementById('freqSpacing').value;
+  return Array.from({length:16}, (_,i) => base + i * spacing);
+}
+
+function updateBaudDisplay() {
+  const sd   = +document.getElementById('symDuration').value;
+  const bps  = Math.round((4 / sd) * 1000); // 4 bits per symbol
+  document.getElementById('baudDisplay').textContent = `${bps} bps`;
+}
+updateBaudDisplay();
+
+// Build symbol grid UI
+(function buildGrid(){
+  const g = document.getElementById('symbolGrid');
+  for(let i=0;i<16;i++){
+    const c = document.createElement('div');
+    c.className = 'sym-cell';
+    c.id = `sym${i}`;
+    c.textContent = i.toString(16).toUpperCase();
+    g.appendChild(c);
+  }
+})();
+
+// ══════════════════════════════════════════════════════════
+// PACKET FORMAT  (same 16-byte header as before)
+// ══════════════════════════════════════════════════════════
+const MAGIC      = [0x41,0x43,0x53,0x54]; // "ACST"
+const TYPE_TEXT  = 0x54;
+const TYPE_IMAGE = 0x49;
+const HEADER_LEN = 16;
+
+function buildHeader(type, payloadLen, imgW=0, imgH=0){
+  const h = new Uint8Array(HEADER_LEN);
+  h[0]=MAGIC[0];h[1]=MAGIC[1];h[2]=MAGIC[2];h[3]=MAGIC[3];
+  h[4]=type;
+  h[5]=(payloadLen>>24)&0xff; h[6]=(payloadLen>>16)&0xff;
+  h[7]=(payloadLen>>8)&0xff;  h[8]=payloadLen&0xff;
+  h[9]=(imgW>>8)&0xff;  h[10]=imgW&0xff;
+  h[11]=(imgH>>8)&0xff; h[12]=imgH&0xff;
+  return h;
+}
+
+function parseHeader(bytes){
+  if(bytes.length<HEADER_LEN) return null;
+  for(let i=0;i<4;i++) if(bytes[i]!==MAGIC[i]) return null;
+  const type       = bytes[4];
+  const payloadLen = (bytes[5]<<24)|(bytes[6]<<16)|(bytes[7]<<8)|bytes[8];
+  const imgW       = (bytes[9]<<8)|bytes[10];
+  const imgH       = (bytes[11]<<8)|bytes[12];
+  return {type,payloadLen,imgW,imgH};
+}
+
+// ══════════════════════════════════════════════════════════
+// NIBBLE HELPERS (4 bits = 1 nibble = 1 MFSK symbol)
+// ══════════════════════════════════════════════════════════
+function bytesToNibbles(bytes){
+  const out = [];
+  for(const b of bytes){ out.push((b>>4)&0xf); out.push(b&0xf); }
+  return out;
+}
+function nibblesToBytes(nibbles){
+  const out = [];
+  for(let i=0;i+1<nibbles.length;i+=2)
+    out.push(((nibbles[i]&0xf)<<4)|(nibbles[i+1]&0xf));
+  return new Uint8Array(out);
+}
+
+// ══════════════════════════════════════════════════════════
+// MODE SWITCHING
+// ══════════════════════════════════════════════════════════
+let txMode = 'text';
+let pendingJpegBytes = null;
+let pendingOrigCanvas = null;
+let pendingImgW = 0, pendingImgH = 0;
+
+function setMode(mode){
+  txMode = mode;
+  document.getElementById('tabText').classList.toggle('active',  mode==='text');
+  document.getElementById('tabImage').classList.toggle('active', mode==='image');
+  document.getElementById('textMode').style.display  = mode==='text'  ? '' : 'none';
+  document.getElementById('imageMode').style.display = mode==='image' ? '' : 'none';
+}
+
+// ══════════════════════════════════════════════════════════
+// IMAGE UPLOAD + JPEG COMPRESSION
+// ══════════════════════════════════════════════════════════
+const imgDrop = document.getElementById('imgDrop');
+imgDrop.addEventListener('dragover',  e=>{ e.preventDefault(); imgDrop.classList.add('drag-over'); });
+imgDrop.addEventListener('dragleave', ()=> imgDrop.classList.remove('drag-over'));
+imgDrop.addEventListener('drop', e=>{
+  e.preventDefault(); imgDrop.classList.remove('drag-over');
+  if(e.dataTransfer.files[0]) handleImageFile(e.dataTransfer.files[0]);
+});
+
+function handleImageFile(file){
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const size = +document.getElementById('imgSize').value;
+      const oc = document.createElement('canvas');
+      oc.width = size; oc.height = size;
+      const ctx = oc.getContext('2d');
+      // Use smoothing for better downscale quality
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(img, 0, 0, size, size);
+      pendingOrigCanvas = oc;
+      pendingImgW = pendingImgH = size;
+      compressAndPreview();
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function onQualityChange(){
+  const q = document.getElementById('jpegQuality').value;
+  document.getElementById('qvalDisplay').textContent = q + '%';
+  if(pendingOrigCanvas) compressAndPreview();
+}
+
+function compressAndPreview(){
+  const q = +document.getElementById('jpegQuality').value / 100;
+  const dataURL = pendingOrigCanvas.toDataURL('image/jpeg', q);
+  // Convert dataURL to Uint8Array (JPEG bytes)
+  const b64 = dataURL.split(',')[1];
+  const bin = atob(b64);
+  pendingJpegBytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) pendingJpegBytes[i] = bin.charCodeAt(i);
+
+  // Show preview
+  const scale = Math.max(1, Math.floor(120/Math.max(pendingImgW,pendingImgH)));
+  const c = document.getElementById('imgPreviewCanvas');
+  c.width = pendingImgW*scale; c.height = pendingImgH*scale;
+  c.style.width=(pendingImgW*scale)+'px'; c.style.height=(pendingImgH*scale)+'px';
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  const img2 = new Image();
+  img2.onload = () => ctx.drawImage(img2,0,0,pendingImgW*scale,pendingImgH*scale);
+  img2.src = dataURL;
+
+  const sd = +document.getElementById('symDuration').value;
+  const totalSymbols = Math.ceil((HEADER_LEN + pendingJpegBytes.length)*2); // 2 nibbles/byte
+  const estSec = ((totalSymbols + PREAMBLE_SYMS) * sd / 1000).toFixed(1);
+
+  document.getElementById('imgMeta').innerHTML =
+    `SIZE: <span>${pendingImgW}×${pendingImgH}px</span><br>`+
+    `JPEG: <span class="fast">${pendingJpegBytes.length} bytes</span><br>`+
+    `SYMBOLS: <span>${totalSymbols}</span><br>`+
+    `EST TIME: <span class="fast">~${estSec}s</span>`;
+
+  document.getElementById('imgPreviewWrap').classList.add('visible');
+  imgDrop.querySelector('.drop-label').textContent = 'IMAGE LOADED — DROP NEW TO REPLACE';
+}
+
+// ══════════════════════════════════════════════════════════
+// SENDER
+// ══════════════════════════════════════════════════════════
+let txCtx = null;
+
+async function transmit(){
+  const symDur  = +document.getElementById('symDuration').value;
+  const freqs   = getFreqs();
+  const btn     = document.getElementById('txBtn');
+
+  let payloadBytes, header;
+  if(txMode === 'text'){
+    const text = document.getElementById('txInput').value;
+    if(!text) return;
+    payloadBytes = new TextEncoder().encode(text);
+    header = buildHeader(TYPE_TEXT, payloadBytes.length);
+  } else {
+    if(!pendingJpegBytes){
+      setTxStatus('warn','NO IMAGE LOADED'); return;
+    }
+    payloadBytes = pendingJpegBytes;
+    header = buildHeader(TYPE_IMAGE, payloadBytes.length, pendingImgW, pendingImgH);
+  }
+
+  const fullPacket = new Uint8Array(header.length + payloadBytes.length);
+  fullPacket.set(header, 0); fullPacket.set(payloadBytes, header.length);
+  const nibbles = bytesToNibbles(fullPacket);
+
+  btn.disabled = true;
+  document.getElementById('txAnim').classList.add('on');
+  txCtx = new (window.AudioContext||window.webkitAudioContext)();
+
+  const symS = symDur / 1000;
+  let t = txCtx.currentTime + 0.05;
+
+  // Preamble: distinct below-range tone
+  playTone(txCtx, PREAMBLE_FREQ, t, symS * PREAMBLE_SYMS, 0.45);
+  t += symS * PREAMBLE_SYMS + 0.03;
+
+  // Data nibbles → each nibble is one MFSK symbol
+  nibbles.forEach(nib => {
+    playTone(txCtx, freqs[nib], t, symS * 0.92, 0.38);
+    t += symS;
+  });
+
+  const txStart = performance.now() + 50;
+  const totalMs = (t - txCtx.currentTime) * 1000;
+  const progEl  = document.getElementById('txProgress');
+  setTxStatus('warn', `TRANSMITTING ${nibbles.length} SYMBOLS…`);
+
+  (function anim(){
+    const frac = Math.min((performance.now()-txStart)/totalMs,1);
+    progEl.style.width = (frac*100)+'%';
+    if(frac<1){ requestAnimationFrame(anim); }
+    else {
+      setTxStatus('ok',`DONE — ${nibbles.length} SYMBOLS · ${fullPacket.length} BYTES`);
+      btn.disabled = false;
+      document.getElementById('txAnim').classList.remove('on');
+    }
+  })();
+}
+
+function setTxStatus(cls,msg){
+  const el = document.getElementById('txStatus');
+  el.className = 'status' + (cls?' '+cls:'');
+  el.textContent = msg;
+}
+
+function playTone(ctx, freq, startTime, duration, gain=0.4){
+  const osc = ctx.createOscillator();
+  const gn  = ctx.createGain();
+  osc.connect(gn); gn.connect(ctx.destination);
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(freq, startTime);
+  gn.gain.setValueAtTime(0, startTime);
+  gn.gain.linearRampToValueAtTime(gain, startTime + 0.004);
+  gn.gain.setValueAtTime(gain, startTime + duration - 0.006);
+  gn.gain.linearRampToValueAtTime(0, startTime + duration);
+  osc.start(startTime);
+  osc.stop(startTime + duration + 0.01);
+}
+
+// ══════════════════════════════════════════════════════════
+// RECEIVER
+// ══════════════════════════════════════════════════════════
+let rxCtx=null, analyser=null, micStream=null;
+let isListening=false, rxAnimId=null, sampleInterval=null;
+
+const RX_IDLE=0, RX_PREAMBLE=1, RX_DATA=2;
+let rxState=RX_IDLE, rxNibbles=[], lastSymTime=0, preambleAt=0, silenceCount=0;
+let sampleBuf=[];
+
+const rxCanvas    = document.getElementById('rxCanvas');
+const rxCanvasCTX = rxCanvas.getContext('2d');
+
+function toggleListen(){ isListening ? stopListening() : startListening(); }
+
+async function startListening(){
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+    rxCtx     = new (window.AudioContext||window.webkitAudioContext)();
+    analyser  = rxCtx.createAnalyser();
+    analyser.fftSize = 16384;          // High resolution for MFSK
+    analyser.smoothingTimeConstant = 0.3;
+    rxCtx.createMediaStreamSource(micStream).connect(analyser);
+    isListening = true;
+    document.getElementById('listenBtn').textContent = '■ STOP LISTENING';
+    document.getElementById('listenBtn').classList.add('active');
+    setRxStatus('info','LISTENING — WAITING FOR PREAMBLE…');
+    resetRxState();
+    startSampling();
+    drawVisualizer();
+  }catch(e){ setRxStatus('warn','MIC ERROR: '+e.message); }
+}
+
+function stopListening(){
+  isListening = false;
+  if(micStream)      micStream.getTracks().forEach(t=>t.stop());
+  if(rxCtx)          rxCtx.close();
+  if(rxAnimId)       cancelAnimationFrame(rxAnimId);
+  if(sampleInterval) clearInterval(sampleInterval);
+  document.getElementById('listenBtn').textContent = '⬤ START LISTENING';
+  document.getElementById('listenBtn').classList.remove('active');
+  setRxStatus('','MICROPHONE INACTIVE');
+}
+
+function setRxStatus(cls,msg){
+  const el = document.getElementById('rxStatus');
+  el.className = 'status'+(cls?' '+cls:'');
+  el.textContent = msg;
+}
+
+function resetRxState(){
+  rxState=RX_IDLE; rxNibbles=[]; sampleBuf=[]; preambleAt=0; silenceCount=0;
+  document.getElementById('rxImgProgress').classList.remove('visible');
+}
+
+// Returns {symbol: 0-15, magnitude} for dominant frequency among the 16 MFSK tones
+function detectSymbol(){
+  if(!analyser) return null;
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(buf);
+  const nyq = rxCtx.sampleRate / 2;
+  const bw  = nyq / analyser.frequencyBinCount;
+  const freqs = getFreqs();
+
+  let bestSym=-1, bestMag=0;
+  const mags = freqs.map((f,i)=>{
+    const bin = Math.round(f/bw);
+    const w=4; let s=0;
+    for(let j=Math.max(0,bin-w);j<=Math.min(buf.length-1,bin+w);j++) s+=buf[j];
+    return s/(2*w+1)/255;
+  });
+  mags.forEach((m,i)=>{ if(m>bestMag){ bestMag=m; bestSym=i; } });
+  return {symbol:bestSym, magnitude:bestMag, mags};
+}
+
+function getPreambleMag(){
+  if(!analyser) return 0;
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(buf);
+  const bw = (rxCtx.sampleRate/2)/analyser.frequencyBinCount;
+  const bin = Math.round(PREAMBLE_FREQ/bw);
+  let s=0; const w=4;
+  for(let j=Math.max(0,bin-w);j<=Math.min(buf.length-1,bin+w);j++) s+=buf[j];
+  return s/(2*w+1)/255;
+}
+
+function startSampling(){
+  const symDur = +document.getElementById('symDuration').value;
+  const sampleMs = Math.max(15, Math.floor(symDur/4));
+
+  sampleInterval = setInterval(()=>{
+    const sd = +document.getElementById('symDuration').value;
+    const THRESH = 0.06;
+    const now = performance.now();
+    const mp  = getPreambleMag();
+    const det = detectSymbol();
+    if(!det) return;
+
+    // Update symbol grid UI
+    det.mags.forEach((m,i)=>{
+      const el = document.getElementById('sym'+i);
+      if(!el) return;
+      const pct = Math.min(m*300,100);
+      if(i===det.symbol && m>THRESH){ el.classList.add('hottest'); el.classList.remove('hot'); }
+      else if(m>THRESH*0.5){ el.classList.remove('hottest'); el.classList.add('hot'); }
+      else { el.classList.remove('hot','hottest'); }
+    });
+
+    if(rxState===RX_IDLE){
+      if(mp>THRESH && mp>det.magnitude*1.2){
+        if(!preambleAt) preambleAt=now;
+        if(now-preambleAt>sd*1.5){ rxState=RX_PREAMBLE; setRxStatus('warn','PREAMBLE — INCOMING…'); }
+      } else { preambleAt=0; }
+
+    } else if(rxState===RX_PREAMBLE){
+      if(mp<THRESH*0.5 && det.magnitude<THRESH){
+        rxState=RX_DATA; rxNibbles=[]; sampleBuf=[];
+        lastSymTime=now; silenceCount=0;
+        setRxStatus('info','RECEIVING DATA…');
+      }
+
+    } else if(rxState===RX_DATA){
+      if(det.magnitude>THRESH){
+        sampleBuf.push(det.symbol);
+        silenceCount=0;
+      } else {
+        sampleBuf.push(null);
+      }
+
+      if(now-lastSymTime>=sd){
+        const valid = sampleBuf.filter(x=>x!==null);
+        if(valid.length>0){
+          // Majority vote among samples
+          const counts = new Array(16).fill(0);
+          valid.forEach(s=>counts[s]++);
+          const winner = counts.indexOf(Math.max(...counts));
+          rxNibbles.push(winner);
+          silenceCount=0;
+          liveUpdateRxImage();
+        } else {
+          silenceCount++;
+          if(silenceCount>=4 && rxNibbles.length>=HEADER_LEN*2){
+            finalizePacket(); return;
+          }
+        }
+        sampleBuf=[]; lastSymTime=now;
+        document.getElementById('decodedBits').textContent=
+          `SYMBOLS: ${rxNibbles.length} (${(rxNibbles.length/2).toFixed(0)} bytes)`;
+      }
+    }
+  }, sampleMs);
+}
+
+function tryParseHeader(){
+  if(rxNibbles.length < HEADER_LEN*2) return null;
+  return parseHeader(nibblesToBytes(rxNibbles.slice(0, HEADER_LEN*2)));
+}
+
+function liveUpdateRxImage(){
+  const hdr = tryParseHeader();
+  if(!hdr||hdr.type!==TYPE_IMAGE) return;
+  const totalNibbles = (HEADER_LEN+hdr.payloadLen)*2;
+  const pct = Math.min(rxNibbles.length/totalNibbles*100,100);
+  document.getElementById('rxImgProgress').classList.add('visible');
+  document.getElementById('rxImgBar').style.width = pct+'%';
+  document.getElementById('rxImgLabel').textContent =
+    `RECEIVING IMAGE — ${rxNibbles.length}/${totalNibbles} SYMBOLS (${pct.toFixed(0)}%)`;
+  // Auto-finalize when we have all expected data
+  if(rxNibbles.length>=totalNibbles) { finalizePacket(); }
+}
+
+function finalizePacket(){
+  // Align nibbles to bytes
+  const trimNib = rxNibbles.slice(0, Math.floor(rxNibbles.length/2)*2);
+  if(trimNib.length < HEADER_LEN*2){
+    setRxStatus('warn','INCOMPLETE PACKET'); resetRxState();
+    setTimeout(()=>{ if(isListening) setRxStatus('info','LISTENING — WAITING FOR PREAMBLE…'); },3000);
+    return;
+  }
+  const allBytes = nibblesToBytes(trimNib);
+  const hdr = parseHeader(allBytes);
+  if(!hdr){ setRxStatus('warn','BAD HEADER — MAGIC MISMATCH'); resetRxState(); return; }
+
+  const payload = allBytes.slice(HEADER_LEN, HEADER_LEN+hdr.payloadLen);
+  const out = document.getElementById('rxOutput');
+
+  if(hdr.type===TYPE_TEXT){
+    const text = new TextDecoder().decode(payload);
+    out.textContent=text; out.classList.add('has-content');
+    document.getElementById('rxImageCanvas').classList.remove('visible');
+    setRxStatus('ok',`TEXT RECEIVED — ${payload.length} bytes`);
+
+  } else if(hdr.type===TYPE_IMAGE){
+    // payload is JPEG bytes — decode via Blob + Image
+    const blob = new Blob([payload], {type:'image/jpeg'});
+    const url  = URL.createObjectURL(blob);
+    const img  = new Image();
+    img.onload = ()=>{
+      const c = document.getElementById('rxImageCanvas');
+      const scale = Math.max(1, Math.floor(220/Math.max(img.width,img.height)));
+      c.width=img.width*scale; c.height=img.height*scale;
+      c.style.width=(img.width*scale)+'px'; c.style.height=(img.height*scale)+'px';
+      c.classList.add('visible');
+      const ctx = c.getContext('2d');
+      ctx.imageSmoothingEnabled=false;
+      ctx.drawImage(img,0,0,c.width,c.height);
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+    document.getElementById('rxImgProgress').classList.remove('visible');
+    out.textContent=`[IMAGE ${hdr.imgW}×${hdr.imgH}px JPEG — ${payload.length} bytes received]`;
+    out.classList.add('has-content');
+    setRxStatus('ok',`IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes`);
+
+  } else {
+    setRxStatus('warn',`UNKNOWN TYPE: 0x${hdr.type.toString(16)}`);
+  }
+
+  resetRxState();
+  setTimeout(()=>{ if(isListening) setRxStatus('info','LISTENING — WAITING FOR PREAMBLE…'); },4000);
+}
+
+function clearOutput(){
+  const out=document.getElementById('rxOutput');
+  out.textContent='—'; out.classList.remove('has-content');
+  document.getElementById('decodedBits').textContent='';
+  document.getElementById('rxImageCanvas').classList.remove('visible');
+  document.getElementById('rxImgProgress').classList.remove('visible');
+  resetRxState();
+}
+
+// ══════════════════════════════════════════════════════════
+// VISUALIZER  — shows all 16 MFSK frequency bands
+// ══════════════════════════════════════════════════════════
+function drawVisualizer(){
+  if(!isListening) return;
+  rxAnimId = requestAnimationFrame(drawVisualizer);
+  const W = rxCanvas.width  = rxCanvas.offsetWidth  * devicePixelRatio;
+  const H = rxCanvas.height = rxCanvas.offsetHeight * devicePixelRatio;
+  rxCanvasCTX.clearRect(0,0,W,H);
+  if(!analyser) return;
+
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(buf);
+  const nyq  = rxCtx.sampleRate/2;
+  const bw   = nyq/analyser.frequencyBinCount;
+  const freqs = getFreqs();
+  const maxHz = freqs[freqs.length-1] * 1.3;
+  const binsShow = Math.floor(maxHz/bw);
+
+  // Grid
+  rxCanvasCTX.strokeStyle='rgba(13,61,90,0.5)'; rxCanvasCTX.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const y=(i/4)*H;
+    rxCanvasCTX.beginPath(); rxCanvasCTX.moveTo(0,y); rxCanvasCTX.lineTo(W,y); rxCanvasCTX.stroke();
+  }
+
+  // Spectrum bars
+  const barW = W/binsShow;
+  for(let i=0;i<binsShow;i++){
+    const v=buf[i]/255, h=v*H, hz=i*bw;
+    // Check proximity to MFSK tones
+    let minD=Infinity;
+    freqs.forEach(f=>{ const d=Math.abs(hz-f); if(d<minD) minD=d; });
+    const pDist = Math.abs(hz-PREAMBLE_FREQ);
+    let color;
+    if(pDist<80)  color=`rgba(255,200,50,${0.5+v*0.5})`;
+    else if(minD<80) color=`rgba(0,212,255,${0.4+v*0.6})`;
+    else              color=`rgba(20,80,100,${0.25+v*0.4})`;
+    rxCanvasCTX.fillStyle=color;
+    rxCanvasCTX.fillRect(i*barW, H-h, Math.max(barW-0.3,1), h);
+  }
+
+  // Mark each MFSK tone
+  rxCanvasCTX.font=`${7*devicePixelRatio}px Share Tech Mono`;
+  freqs.forEach((f,i)=>{
+    const x = (f/maxHz)*W;
+    rxCanvasCTX.strokeStyle='rgba(0,212,255,0.3)';
+    rxCanvasCTX.setLineDash([2,3]); rxCanvasCTX.lineWidth=1;
+    rxCanvasCTX.globalAlpha=0.5;
+    rxCanvasCTX.beginPath(); rxCanvasCTX.moveTo(x,0); rxCanvasCTX.lineTo(x,H); rxCanvasCTX.stroke();
+    rxCanvasCTX.setLineDash([]); rxCanvasCTX.globalAlpha=1;
+    rxCanvasCTX.fillStyle='rgba(0,212,255,0.6)';
+    rxCanvasCTX.fillText(i.toString(16).toUpperCase(), x+1, H-3);
+  });
+  // Preamble marker
+  const px = (PREAMBLE_FREQ/maxHz)*W;
+  rxCanvasCTX.strokeStyle='rgba(255,200,50,0.4)';
+  rxCanvasCTX.setLineDash([2,3]); rxCanvasCTX.lineWidth=1;
+  rxCanvasCTX.globalAlpha=0.5;
+  rxCanvasCTX.beginPath(); rxCanvasCTX.moveTo(px,0); rxCanvasCTX.lineTo(px,H); rxCanvasCTX.stroke();
+  rxCanvasCTX.setLineDash([]); rxCanvasCTX.globalAlpha=1;
+  rxCanvasCTX.fillStyle='rgba(255,200,50,0.8)';
+  rxCanvasCTX.fillText('P', px+1, H-3);
+}
+</script>
+</body>
+</html>
