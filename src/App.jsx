@@ -443,19 +443,27 @@ export default function App() {
                     for (let i = 1; i < buf.length; i++) if (buf[i] !== buf[i - 1]) alternations++
 
                     if (alternations >= 4 && buf.length >= 6) {
-                        // Chirp confirmed — go DIRECTLY to DATA mode.
-                        // No timing-based SYNC wait. Auto-sync in finalizePacket handles
-                        // any leading garbage nibbles collected before/during preamble end.
-                        rxStateRef.current = RX_DATA
-                        rxNibblesRef.current = []
-                        sampleBufRef.current = []
-                        lastSymTimeRef.current = now
-                        silenceCountRef.current = 0
-                        dataStartAtRef.current = now
-                        setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — COLLECTING…' })
+                        rxStateRef.current = RX_SYNC
+                        // Dead-reckoning from first signal edge:
+                        // Preamble tones take: PREAMBLE_PAIRS * 2 * symDuration
+                        // Guard gap takes: 60ms
+                        dataStartAtRef.current = preambleFirstSeenRef.current + (PREAMBLE_PAIRS * 2 * sd) + 60
+                        setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — SYNCING…' })
                     }
                 } else {
                     if (syncBufRef.current.length > 0) syncBufRef.current.pop()
+                    if (syncBufRef.current.length === 0) preambleFirstSeenRef.current = 0
+                }
+
+            } else if (rxStateRef.current === RX_SYNC) {
+                // Wait exactly for the guard gap to finish
+                if (now >= dataStartAtRef.current) {
+                    rxStateRef.current = RX_DATA
+                    rxNibblesRef.current = []
+                    sampleBufRef.current = []
+                    lastSymTimeRef.current = now
+                    silenceCountRef.current = 0
+                    setRxStatus({ cls: 'info', msg: 'RECEIVING DATA…' })
                 }
 
             } else if (rxStateRef.current === RX_DATA) {
@@ -467,31 +475,34 @@ export default function App() {
                     return
                 }
 
-                if (det.magnitude > THRESH) {
+                // Only accumulate non-null symbols for majority voting inside this window
+                if (det.magnitude > THRESH && det.symbol !== null) {
                     sampleBufRef.current.push(det.symbol)
                     silenceCountRef.current = 0
                 } else {
                     sampleBufRef.current.push(null)
+                    silenceCountRef.current++
                 }
 
+                // Every symDuration, integrate the window and finalize a nibble
                 if (now - lastSymTimeRef.current >= sd) {
                     const valid = sampleBufRef.current.filter(x => x !== null)
                     if (valid.length > 0) {
                         const counts = new Array(16).fill(0)
                         valid.forEach(s => counts[s]++)
                         rxNibblesRef.current.push(counts.indexOf(Math.max(...counts)))
-                        silenceCountRef.current = 0
-                        // Update status to show receiving
+                        // Update status
                         if (rxStateRef.current === RX_DATA && rxNibblesRef.current.length > 8) {
                             setRxStatus({ cls: 'info', msg: 'RECEIVING DATA…' })
                         }
                         liveUpdateRxImage()
                     } else {
-                        silenceCountRef.current++
-                        if (silenceCountRef.current >= 5 && rxNibblesRef.current.length >= HEADER_LEN * 2) {
+                        // Dead air for a full symbol duration = packet maybe over
+                        if (rxNibblesRef.current.length >= HEADER_LEN * 2) {
                             finalizePacketRef.current?.(); return
                         }
-                        if (silenceCountRef.current >= 15 && rxNibblesRef.current.length < HEADER_LEN * 2) {
+                        if (rxNibblesRef.current.length < HEADER_LEN * 2 && rxNibblesRef.current.length > 0) {
+                            // Too short to be a valid packet, abort
                             resetRxState()
                             setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }); return
                         }
