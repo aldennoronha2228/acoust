@@ -311,33 +311,47 @@ export default function App() {
     }
 
 
-    // Magic bytes as nibbles: 0x41='A', 0x43='C', 0x53='S', 0x54='T'
+    // Magic bytes as nibbles: "ACST" = 0x41,0x43,0x53,0x54
     const MAGIC_NIBS = [4, 1, 4, 3, 5, 3, 5, 4]
 
-    // Scan the raw nibble stream for the ACST magic at any offset (up to 32 nibbles)
-    // Returns the nibble index where magic starts, or -1 if not found.
+    // Scan ALL received nibbles for the ACST magic.
+    // Allows up to 1 nibble mismatch to tolerate occasional symbol errors.
+    // Returns { off, errors } or null if not found.
     function findSyncOffset(raw) {
-        const limit = Math.min(raw.length - MAGIC_NIBS.length, 32)
+        const limit = raw.length - MAGIC_NIBS.length  // scan the ENTIRE buffer
         for (let off = 0; off <= limit; off++) {
-            let ok = true
+            let errors = 0
             for (let j = 0; j < MAGIC_NIBS.length; j++) {
-                if (raw[off + j] !== MAGIC_NIBS[j]) { ok = false; break }
+                if (raw[off + j] !== MAGIC_NIBS[j]) {
+                    errors++
+                    if (errors > 1) break  // allow max 1 mismatch
+                }
             }
-            if (ok) return off
+            if (errors <= 1) return off
         }
         return -1
+    }
+
+    // Convert nibble array to readable hex string for debugging
+    function nibsToHex(nibs) {
+        const bytes = nibblesToBytes(nibs.slice(0, Math.floor(nibs.length / 2) * 2))
+        return Array.from(bytes).slice(0, 20).map(b => b.toString(16).padStart(2, '0')).join(' ')
     }
 
     function finalizePacket() {
         const raw = rxNibblesRef.current
 
-        // ── Auto-sync: find where the ACST header actually starts ──
+        // ── Auto-sync: scan ALL nibbles for ACST magic (with 1-error tolerance) ──
         const syncOff = findSyncOffset(raw)
         if (syncOff < 0) {
             const got = Math.floor(raw.length / 2)
-            setRxStatus({ cls: 'warn', msg: `NO SYNC — received ${got} bytes, no magic found` })
+            const hexDump = nibsToHex(raw)
+            // Show hex dump in output area so user and dev can see what arrived
+            setRxOutput(`NO SYNC (${got} bytes)\nRaw hex: ${hexDump}\n(expected magic: 41 43 53 54)`)
+            setRxOutputHas(true)
+            setRxStatus({ cls: 'warn', msg: `NO SYNC — ${got} bytes received but magic not found` })
             resetRxState()
-            setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 3000)
+            setTimeout(() => { if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }) }, 5000)
             return
         }
 
