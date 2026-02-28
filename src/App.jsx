@@ -447,7 +447,8 @@ export default function App() {
                         // Dead-reckoning from first signal edge:
                         // Preamble tones take: PREAMBLE_PAIRS * 2 * symDuration
                         // Guard gap takes: 60ms
-                        dataStartAtRef.current = preambleFirstSeenRef.current + (PREAMBLE_PAIRS * 2 * sd) + 60
+                        // We subtract 40ms to compensate for the FFT window latency (it takes ~40ms of signal to breach threshold)
+                        dataStartAtRef.current = preambleFirstSeenRef.current - 40 + (PREAMBLE_PAIRS * 2 * sd) + 60
                         setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — SYNCING…' })
                     }
                 } else {
@@ -507,7 +508,14 @@ export default function App() {
                             setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' }); return
                         }
                     }
-                    sampleBufRef.current = []; lastSymTimeRef.current = now
+                    sampleBufRef.current = [];
+
+                    // CRITICAL CLOCK SYNC FIX:
+                    // Advance perfectly by 1 symbol duration. Do NOT use `now` here, 
+                    // otherwise JavaScript setInterval jitter accumulates and shifts 
+                    // the integration window off the symbol boundaries over time!
+                    lastSymTimeRef.current += sd
+
                     const nb = rxNibblesRef.current.length
                     setDecodedBits(`SYM: ${nb}  BYTES: ${Math.floor(nb / 2)}  SILENCE: ${silenceCountRef.current}`)
                 }
