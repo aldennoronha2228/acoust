@@ -147,7 +147,8 @@ export default function App() {
     const sampleBufRef = useRef([])
     const lastSymTimeRef = useRef(0)
     const silenceCountRef = useRef(0)
-    const syncBufRef = useRef([])     // rolling window for chirp detection
+    const syncBufRef = useRef([])        // rolling window for chirp detection
+    const preambleFirstSeenRef = useRef(0) // timestamp of FIRST preamble signal sample
     const dataStartAtRef = useRef(0)
 
     useEffect(() => { isListeningRef.current = isListening }, [isListening])
@@ -304,9 +305,11 @@ export default function App() {
         sampleBufRef.current = []
         silenceCountRef.current = 0
         syncBufRef.current = []
+        preambleFirstSeenRef.current = 0
         dataStartAtRef.current = 0
         setRxImgProg({ visible: false, pct: 0, label: 'RECEIVING…' })
     }
+
 
     function finalizePacket() {
         const trimNib = rxNibblesRef.current.slice(0, Math.floor(rxNibblesRef.current.length / 2) * 2)
@@ -383,30 +386,30 @@ export default function App() {
             // ══ STATE MACHINE ══
 
             if (rxStateRef.current === RX_IDLE) {
-                // Detect chirp preamble: both A and B must have been seen strongly
-                // We keep a rolling buffer of recent dominant tone detections
                 const dominant = magA > magB ? 'A' : 'B'
                 if (Math.max(magA, magB) > THRESH) {
-                    syncBufRef.current.push(dominant)
-                    if (syncBufRef.current.length > 20) syncBufRef.current.shift() // keep last 20
+                    // Record the FIRST moment we see preamble signal (before confirmation)
+                    if (!preambleFirstSeenRef.current) preambleFirstSeenRef.current = now
 
-                    // Count alternations in the buffer: ABABAB pattern
+                    syncBufRef.current.push(dominant)
+                    if (syncBufRef.current.length > 20) syncBufRef.current.shift()
+
                     const buf = syncBufRef.current
                     let alternations = 0
                     for (let i = 1; i < buf.length; i++) if (buf[i] !== buf[i - 1]) alternations++
 
-                    // Need at least 4 alternations (A→B, B→A, A→B, B→A) to confirm chirp
                     if (alternations >= 4 && buf.length >= 6) {
                         rxStateRef.current = RX_SYNC
-                        // Timing: preamble lasts PREAMBLE_PAIRS * 2 * symDur from first detection
-                        // We detected mid-preamble, so data starts roughly (PREAMBLE_PAIRS * 2 - buf.length/2) symbols from now
-                        // Simpler: wait one more full preamble length for safety
-                        dataStartAtRef.current = now + (PREAMBLE_PAIRS * 2 * sd) + 80
+                        // KEY FIX: compute data-start from FIRST-SEEN time, not detection time.
+                        // preamble = PREAMBLE_PAIRS*2 symbols, gap = 60ms
+                        // preambleFirstSeen ≈ when preamble actually started
+                        dataStartAtRef.current = preambleFirstSeenRef.current + (PREAMBLE_PAIRS * 2 * sd) + 60
                         setRxStatus({ cls: 'warn', msg: 'CHIRP DETECTED — SYNCING…' })
                     }
                 } else {
-                    // No preamble signal: slowly drain the buffer
                     if (syncBufRef.current.length > 0) syncBufRef.current.pop()
+                    // Reset first-seen if we lost signal entirely
+                    if (syncBufRef.current.length === 0) preambleFirstSeenRef.current = 0
                 }
 
             } else if (rxStateRef.current === RX_SYNC) {
