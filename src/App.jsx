@@ -11,7 +11,7 @@ const TYPE_IMAGE = 0x49
 const HEADER_LEN = 16
 const RX_IDLE = 0, RX_PREAMBLE = 1, RX_DATA = 2
 
-// ── packet helpers ──
+// ── Packet helpers ──
 function buildHeader(type, payloadLen, imgW = 0, imgH = 0) {
     const h = new Uint8Array(HEADER_LEN)
     h[0] = MAGIC[0]; h[1] = MAGIC[1]; h[2] = MAGIC[2]; h[3] = MAGIC[3]
@@ -65,14 +65,14 @@ function playTone(ctx, freq, startTime, duration, gain = 0.4) {
 // ══════════════════════════════════════════════════════════
 export default function App() {
 
-    // ── config ──
-    const [symDuration, setSymDuration] = useState(100)   // slightly slower default = more reliable
+    // ── Config ──
+    const [symDuration, setSymDuration] = useState(120)   // 120ms default — more reliable
     const [baseFreq, setBaseFreq] = useState(1000)
     const [freqSpacing, setFreqSpacing] = useState(200)
     const [imgSize, setImgSize] = useState(48)
-    const [threshold, setThreshold] = useState(0.05)  // configurable sensitivity
+    const [threshold, setThreshold] = useState(0.03)  // lower default — more sensitive
 
-    // Keep config accessible inside intervals via refs (fix for stale-closure bug)
+    // Keep ALL config in refs so setInterval always reads current values (stale-closure fix)
     const symDurRef = useRef(symDuration)
     const baseFreqRef = useRef(baseFreq)
     const spacingRef = useRef(freqSpacing)
@@ -85,15 +85,17 @@ export default function App() {
 
     const baudRate = Math.round((4 / symDuration) * 1000)
 
-    const getFreqsFromRefs = () =>
+    // Always read freqs from refs inside intervals
+    const getFreqsLive = () =>
         Array.from({ length: 16 }, (_, i) => baseFreqRef.current + i * spacingRef.current)
 
+    // For render-scoped use (visualizer markers etc.)
     const getFreqs = useCallback(() =>
         Array.from({ length: 16 }, (_, i) => baseFreq + i * freqSpacing),
         [baseFreq, freqSpacing]
     )
 
-    // ── TX ──
+    // ── TX state ──
     const [txMode, setTxMode] = useState('text')
     const [txInput, setTxInput] = useState('Hello World!')
     const [txStatus, setTxStatus] = useState({ cls: '', msg: 'READY — MFSK-16 MODE' })
@@ -123,9 +125,9 @@ export default function App() {
     const [rxImgSrc, setRxImgSrc] = useState(null)
     const [rxImgStyle, setRxImgStyle] = useState({})
     const [symCells, setSymCells] = useState(Array(16).fill({ hot: false, hottest: false }))
-    const [debugMag, setDebugMag] = useState({ pre: 0, dom: 0 }) // live magnitude display
+    const [debugMag, setDebugMag] = useState({ pre: '0.000', dom: '0.000', state: 'IDLE' })
 
-    // ── RX audio refs ──
+    // ── Audio refs ──
     const rxCanvasRef = useRef(null)
     const rxCtxRef = useRef(null)
     const analyserRef = useRef(null)
@@ -134,15 +136,20 @@ export default function App() {
     const sampleIntervalRef = useRef(null)
     const isListeningRef = useRef(false)
 
-    // ── RX decode state (ALWAYS use refs, never stale closures) ──
+    // ── Decode state refs ──
     const rxStateRef = useRef(RX_IDLE)
     const rxNibblesRef = useRef([])
     const sampleBufRef = useRef([])
     const lastSymTimeRef = useRef(0)
     const preambleAtRef = useRef(0)
+    const preambleEndsAtRef = useRef(0)   // timing-based data-start time
     const silenceCountRef = useRef(0)
+    const rxDataStartRef = useRef(0)   // when we entered DATA mode (for timeout)
 
     useEffect(() => { isListeningRef.current = isListening }, [isListening])
+
+    // finalizePacket stored in ref so interval always calls latest version
+    const finalizePacketRef = useRef(null)
 
     // ══════════════════════════════════════════════════════
     // IMAGE UPLOAD
@@ -223,10 +230,10 @@ export default function App() {
         let t = txCtxRef.current.currentTime + 0.05
 
         playTone(txCtxRef.current, PREAMBLE_FREQ, t, symS * PREAMBLE_SYMS, 0.5)
-        t += symS * PREAMBLE_SYMS + 0.04 // slightly longer gap after preamble
+        t += symS * PREAMBLE_SYMS + 0.06  // 60ms gap after preamble
 
         nibbles.forEach(nib => {
-            playTone(txCtxRef.current, freqs[nib], t, symS * 0.92, 0.4)
+            playTone(txCtxRef.current, freqs[nib], t, symS * 0.9, 0.4)
             t += symS
         })
 
@@ -247,18 +254,19 @@ export default function App() {
     }
 
     // ══════════════════════════════════════════════════════
-    // RECEIVER — all functions use refs, no stale closures
+    // RECEIVER
     // ══════════════════════════════════════════════════════
     function resetRxState() {
         rxStateRef.current = RX_IDLE
         rxNibblesRef.current = []
         sampleBufRef.current = []
         preambleAtRef.current = 0
+        preambleEndsAtRef.current = 0
         silenceCountRef.current = 0
+        rxDataStartRef.current = 0
         setRxImgProg({ visible: false, pct: 0, label: 'RECEIVING…' })
     }
 
-    // Read FFT magnitudes for each of the 16 MFSK tones using CURRENT refs
     function detectSymbol() {
         const analyser = analyserRef.current
         const rxCtx = rxCtxRef.current
@@ -267,11 +275,11 @@ export default function App() {
         analyser.getByteFrequencyData(buf)
         const nyq = rxCtx.sampleRate / 2
         const bw = nyq / analyser.frequencyBinCount
-        const freqs = getFreqsFromRefs()  // ← uses refs, always current
+        const freqs = getFreqsLive()  // ← always current via refs
 
         const mags = freqs.map(f => {
             const bin = Math.round(f / bw)
-            const w = 5; let s = 0  // wider window for better sensitivity
+            const w = 5; let s = 0
             for (let j = Math.max(0, bin - w); j <= Math.min(buf.length - 1, bin + w); j++) s += buf[j]
             return s / (2 * w + 1) / 255
         })
@@ -288,18 +296,15 @@ export default function App() {
         analyser.getByteFrequencyData(buf)
         const bw = (rxCtx.sampleRate / 2) / analyser.frequencyBinCount
         const bin = Math.round(PREAMBLE_FREQ / bw)
-        let s = 0; const w = 5  // wider window
+        let s = 0; const w = 5
         for (let j = Math.max(0, bin - w); j <= Math.min(buf.length - 1, bin + w); j++) s += buf[j]
         return s / (2 * w + 1) / 255
     }
 
-    // Use a ref for finalizePacket so it's always the latest version inside interval
-    const finalizePacketRef = useRef(null)
-
     function finalizePacket() {
         const trimNib = rxNibblesRef.current.slice(0, Math.floor(rxNibblesRef.current.length / 2) * 2)
         if (trimNib.length < HEADER_LEN * 2) {
-            setRxStatus({ cls: 'warn', msg: `INCOMPLETE — only ${trimNib.length / 2} bytes` })
+            setRxStatus({ cls: 'warn', msg: `INCOMPLETE — got ${Math.floor(trimNib.length / 2)} bytes, need ${HEADER_LEN}+` })
             resetRxState()
             setTimeout(() => {
                 if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
@@ -309,7 +314,7 @@ export default function App() {
         const allBytes = nibblesToBytes(trimNib)
         const hdr = parseHeader(allBytes)
         if (!hdr) {
-            setRxStatus({ cls: 'warn', msg: 'BAD HEADER — check settings match TX' })
+            setRxStatus({ cls: 'warn', msg: 'BAD HEADER — ensure TX/RX use same settings' })
             resetRxState(); return
         }
 
@@ -319,7 +324,7 @@ export default function App() {
             const text = new TextDecoder().decode(payload)
             setRxOutput(text); setRxOutputHas(true)
             setRxImgSrc(null)
-            setRxStatus({ cls: 'ok', msg: `✓ TEXT RECEIVED — ${payload.length} bytes` })
+            setRxStatus({ cls: 'ok', msg: `✓ TEXT RECEIVED — "${text.substring(0, 30)}${text.length > 30 ? '…' : ''}"` })
         } else if (hdr.type === TYPE_IMAGE) {
             const blob = new Blob([payload], { type: 'image/jpeg' })
             const url = URL.createObjectURL(blob)
@@ -334,18 +339,18 @@ export default function App() {
             setRxImgProg(p => ({ ...p, visible: false }))
             setRxOutput(`[IMAGE ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes]`)
             setRxOutputHas(true)
-            setRxStatus({ cls: 'ok', msg: `✓ IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH}px` })
+            setRxStatus({ cls: 'ok', msg: `✓ IMAGE RECEIVED — ${hdr.imgW}×${hdr.imgH}px · ${payload.length} bytes` })
         } else {
             setRxStatus({ cls: 'warn', msg: `UNKNOWN TYPE 0x${hdr.type.toString(16)}` })
         }
         resetRxState()
         setTimeout(() => {
             if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
-        }, 4000)
+        }, 3000)
     }
 
-    // Keep ref in sync so setInterval always calls the latest version
-    useEffect(() => { finalizePacketRef.current = finalizePacket }) // runs every render
+    // Sync to ref every render so intervals always call latest
+    useEffect(() => { finalizePacketRef.current = finalizePacket })
 
     function liveUpdateRxImage() {
         if (rxNibblesRef.current.length < HEADER_LEN * 2) return
@@ -353,19 +358,14 @@ export default function App() {
         if (!hdr || hdr.type !== TYPE_IMAGE) return
         const totalNibbles = (HEADER_LEN + hdr.payloadLen) * 2
         const pct = Math.min(rxNibblesRef.current.length / totalNibbles * 100, 100)
-        setRxImgProg({
-            visible: true, pct,
-            label: `RECEIVING IMAGE — ${rxNibblesRef.current.length}/${totalNibbles} (${pct.toFixed(0)}%)`
-        })
+        setRxImgProg({ visible: true, pct, label: `RECEIVING IMAGE — ${rxNibblesRef.current.length}/${totalNibbles} (${pct.toFixed(0)}%)` })
         if (rxNibblesRef.current.length >= totalNibbles) finalizePacketRef.current?.()
     }
 
     function startSampling() {
-        // sampleMs comes from ref so it uses the value when sampling started — that's fine
-        const sampleMs = Math.max(15, Math.floor(symDurRef.current / 4))
+        const sampleMs = Math.max(12, Math.floor(symDurRef.current / 5))
 
         sampleIntervalRef.current = setInterval(() => {
-            // ↓ Read EVERYTHING from refs — zero stale-closure risk
             const sd = symDurRef.current
             const THRESH = threshRef.current
             const now = performance.now()
@@ -373,22 +373,24 @@ export default function App() {
             const det = detectSymbol()
             if (!det) return
 
-            // Update debug display every tick
-            setDebugMag({ pre: mp.toFixed(3), dom: det.magnitude.toFixed(3) })
+            const stateNames = ['IDLE', 'PREAMBLE', 'DATA']
+            setDebugMag({ pre: mp.toFixed(3), dom: det.magnitude.toFixed(3), state: stateNames[rxStateRef.current] })
 
-            // Update symbol grid
+            // Symbol grid
             setSymCells(det.mags.map((m, i) => ({
                 hot: m > THRESH * 0.4 && !(i === det.symbol && m > THRESH),
                 hottest: i === det.symbol && m > THRESH
             })))
 
             // ── STATE MACHINE ──
+
             if (rxStateRef.current === RX_IDLE) {
-                // FIX: preamble just needs to be above threshold AND dominant among all measured signals
-                // Removed the strict "1.2×" multiplier — in practice mic audio is not that clean
                 if (mp > THRESH) {
                     if (!preambleAtRef.current) preambleAtRef.current = now
-                    if (now - preambleAtRef.current > sd * 1.2) {  // need 1.2 symbols of preamble
+                    if (now - preambleAtRef.current > sd * 1.0) {
+                        // FIX: timing-based data-start — don't rely on magnitude for the transition
+                        // Data starts exactly PREAMBLE_SYMS symbols + 60ms gap after preamble first detected
+                        preambleEndsAtRef.current = preambleAtRef.current + (PREAMBLE_SYMS * sd) + 60
                         rxStateRef.current = RX_PREAMBLE
                         setRxStatus({ cls: 'warn', msg: 'PREAMBLE DETECTED — INCOMING…' })
                     }
@@ -397,18 +399,29 @@ export default function App() {
                 }
 
             } else if (rxStateRef.current === RX_PREAMBLE) {
-                // FIX: only wait for preamble to fade — don't require data silence simultaneously
-                // This fixes the race condition where we'd miss the first data symbol
-                if (mp < THRESH * 0.5) {
+                // FIX: purely TIMING-BASED transition — no longer depends on magnitude
+                // This eliminates the "stuck in PREAMBLE forever" bug caused by room echo
+                if (now >= preambleEndsAtRef.current) {
                     rxStateRef.current = RX_DATA
                     rxNibblesRef.current = []
                     sampleBufRef.current = []
                     lastSymTimeRef.current = now
                     silenceCountRef.current = 0
+                    rxDataStartRef.current = now
                     setRxStatus({ cls: 'info', msg: 'RECEIVING DATA…' })
                 }
 
             } else if (rxStateRef.current === RX_DATA) {
+                // Timeout safety: if no valid packet after 45 seconds, reset
+                if (now - rxDataStartRef.current > 45000) {
+                    setRxStatus({ cls: 'warn', msg: 'RX TIMEOUT — reset and try again' })
+                    resetRxState()
+                    setTimeout(() => {
+                        if (isListeningRef.current) setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
+                    }, 2000)
+                    return
+                }
+
                 if (det.magnitude > THRESH) {
                     sampleBufRef.current.push(det.symbol)
                     silenceCountRef.current = 0
@@ -427,22 +440,26 @@ export default function App() {
                         liveUpdateRxImage()
                     } else {
                         silenceCountRef.current++
-                        // FIX: 6 silent windows (was 4) + must have at least a full header worth of data
-                        if (silenceCountRef.current >= 6 && rxNibblesRef.current.length >= HEADER_LEN * 2) {
+                        if (silenceCountRef.current >= 5 && rxNibblesRef.current.length >= HEADER_LEN * 2) {
                             finalizePacketRef.current?.(); return
+                        }
+                        // FIX: if too many silent windows with NO data at all, reset and re-listen
+                        if (silenceCountRef.current >= 10 && rxNibblesRef.current.length === 0) {
+                            resetRxState()
+                            setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
+                            return
                         }
                     }
                     sampleBufRef.current = []
                     lastSymTimeRef.current = now
-                    setDecodedBits(
-                        `SYM: ${rxNibblesRef.current.length}  BYTES: ${Math.floor(rxNibblesRef.current.length / 2)}`
-                    )
+                    const nb = rxNibblesRef.current.length
+                    setDecodedBits(`SYM: ${nb}  BYTES: ${Math.floor(nb / 2)}  SILENCE: ${silenceCountRef.current}`)
                 }
             }
         }, sampleMs)
     }
 
-    // ── Visualizer (uses refs, safe to call recursively) ──
+    // ── Visualizer ──
     function drawVisualizer() {
         if (!isListeningRef.current) return
         rxAnimIdRef.current = requestAnimationFrame(drawVisualizer)
@@ -460,14 +477,13 @@ export default function App() {
         analyser.getByteFrequencyData(buf)
         const nyq = rxCtx.sampleRate / 2
         const bw = nyq / analyser.frequencyBinCount
-        const freqs = getFreqsFromRefs()
+        const freqs = getFreqsLive()
         const maxHz = freqs[freqs.length - 1] * 1.3
         const binsShow = Math.floor(maxHz / bw)
 
         ctx.strokeStyle = 'rgba(13,61,90,0.5)'; ctx.lineWidth = 1
         for (let i = 0; i <= 4; i++) {
-            const y = (i / 4) * H
-            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke()
+            const y = (i / 4) * H; ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke()
         }
 
         const barW = W / binsShow
@@ -504,12 +520,27 @@ export default function App() {
 
     async function startListening() {
         try {
-            micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+            // ╔══════════════════════════════════════════════════════╗
+            // ║  FIX: Disable echo cancellation, noise suppression, ║
+            // ║  and auto gain — these are the #1 cause of data      ║
+            // ║  being filtered/distorted before it reaches decoder  ║
+            // ╚══════════════════════════════════════════════════════╝
+            const constraints = {
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                    channelCount: 1,
+                },
+                video: false
+            }
+            micStreamRef.current = await navigator.mediaDevices.getUserMedia(constraints)
             rxCtxRef.current = new (window.AudioContext || window.webkitAudioContext)()
             analyserRef.current = rxCtxRef.current.createAnalyser()
             analyserRef.current.fftSize = 16384
-            analyserRef.current.smoothingTimeConstant = 0.2  // less smoothing = faster response
+            analyserRef.current.smoothingTimeConstant = 0.15  // fast response
             rxCtxRef.current.createMediaStreamSource(micStreamRef.current).connect(analyserRef.current)
+
             setIsListening(true)
             isListeningRef.current = true
             setRxStatus({ cls: 'info', msg: 'LISTENING — WAITING FOR PREAMBLE…' })
@@ -529,7 +560,7 @@ export default function App() {
         if (rxAnimIdRef.current) cancelAnimationFrame(rxAnimIdRef.current)
         if (sampleIntervalRef.current) clearInterval(sampleIntervalRef.current)
         setRxStatus({ cls: '', msg: 'MICROPHONE INACTIVE' })
-        setDebugMag({ pre: 0, dom: 0 })
+        setDebugMag({ pre: '0.000', dom: '0.000', state: 'IDLE' })
     }
 
     function toggleListen() { isListening ? stopListening() : startListening() }
@@ -656,9 +687,9 @@ export default function App() {
 
                     <canvas id="rxCanvas" ref={rxCanvasRef} />
 
-                    {/* Debug magnitude display — helps user tune sensitivity */}
                     {isListening && (
                         <div className="debug-bar">
+                            <span>STATE: <em style={{ color: debugMag.state === 'DATA' ? 'var(--accent3)' : debugMag.state === 'PREAMBLE' ? 'var(--accent2)' : 'var(--dim)' }}>{debugMag.state}</em></span>
                             <span>PREAMBLE: <em style={{ color: +debugMag.pre > threshold ? 'var(--accent3)' : 'var(--dim)' }}>{debugMag.pre}</em></span>
                             <span>DOMINANT: <em style={{ color: +debugMag.dom > threshold ? 'var(--accent)' : 'var(--dim)' }}>{debugMag.dom}</em></span>
                             <span style={{ color: 'var(--dim)' }}>THRESH: {threshold}</span>
@@ -684,8 +715,7 @@ export default function App() {
                     </div>
 
                     {rxImgSrc && (
-                        <img id="rxImageCanvas" src={rxImgSrc} alt="received"
-                            className="visible"
+                        <img id="rxImageCanvas" src={rxImgSrc} alt="received" className="visible"
                             style={{ ...rxImgStyle, imageRendering: 'pixelated', border: '1px solid var(--accent3)', boxShadow: '0 0 12px rgba(57,255,20,0.2)', marginTop: 12 }} />
                     )}
 
